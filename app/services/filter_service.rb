@@ -150,10 +150,19 @@ class FilterService
   end
 
   def build_custom_attr_query(query_hash, current_index)
-    filter_operator_value = filter_operation(query_hash, current_index)
+    filter_operator = query_hash[:filter_operator]
     query_operator = query_hash[:query_operator]
     table_name = attribute_model == 'conversation_attribute' ? 'conversations' : 'contacts'
 
+    # Handle is_present and is_not_present specially
+    if filter_operator == 'is_present'
+      return "(#{table_name}.custom_attributes ->> '#{@attribute_key}') IS NOT NULL #{query_operator} "
+    elsif filter_operator == 'is_not_present'
+      return "(#{table_name}.custom_attributes ->> '#{@attribute_key}') IS NULL #{query_operator} "
+    end
+
+    # For other operators, use the standard filter_operation
+    filter_operator_value = filter_operation(query_hash, current_index)
     query = if attribute_data_type == 'text'
               "LOWER(#{table_name}.custom_attributes ->> '#{@attribute_key}')::#{attribute_data_type} #{filter_operator_value} #{query_operator} "
             else

@@ -2,6 +2,7 @@ import {
   OPERATOR_TYPES_1,
   OPERATOR_TYPES_3,
   OPERATOR_TYPES_4,
+  OPERATOR_TYPES_7,
 } from 'dashboard/routes/dashboard/settings/automation/operators';
 import {
   DEFAULT_MESSAGE_CREATED_CONDITION,
@@ -62,7 +63,7 @@ export const isCustomAttributeList = (customAttributes, type) => {
 export const getOperatorTypes = key => {
   const operatorMap = {
     list: OPERATOR_TYPES_1,
-    text: OPERATOR_TYPES_3,
+    text: OPERATOR_TYPES_7, // Includes: equal_to, not_equal_to, contains, does_not_contain, is_present, is_not_present
     number: OPERATOR_TYPES_1,
     link: OPERATOR_TYPES_1,
     date: OPERATOR_TYPES_4,
@@ -304,14 +305,15 @@ export const getOperators = (
   mode,
   key
 ) => {
-  if (mode === 'edit') {
-    const customAttribute = isACustomAttribute(allCustomAttributes, key);
-    if (customAttribute) {
-      return getOperatorTypes(customAttribute.attribute_display_type);
-    }
+  // Check for custom attributes in both edit and create modes
+  const customAttribute = isACustomAttribute(allCustomAttributes, key);
+  if (customAttribute) {
+    return getOperatorTypes(customAttribute.attribute_display_type);
   }
+  
+  // Fall back to standard automation types for non-custom attributes
   const type = getAutomationType(automationTypes, automation, key);
-  return type.filterOperators;
+  return type?.filterOperators || OPERATOR_TYPES_1;
 };
 
 /**

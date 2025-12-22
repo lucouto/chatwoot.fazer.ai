@@ -42,11 +42,6 @@ services:
       - '-b'
       - 0.0.0.0
     restart: always
-    post_start:
-      - command:
-        - sh
-        - '-c'
-        - 'sleep 10 && for i in 1 2 3 4 5; do POSTGRES_STATEMENT_TIMEOUT=600s bundle exec rails db:chatwoot_prepare && break || (echo "Database setup attempt $i/5 failed, retrying..."; sleep 5); done && bundle exec rails branding:update && if [ -n "$${BRAND_ASSETS_URL}" ]; then deployment/extract_brand_assets.sh "$${BRAND_ASSETS_URL}"; fi'
     healthcheck:
       test:
         - CMD-SHELL

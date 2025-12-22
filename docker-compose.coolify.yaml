@@ -6,6 +6,7 @@ services:
     pull_policy: always
     volumes:
       - 'storage:/app/storage'
+      - '/tmp/legacy_base_open_ai_service_fixed.rb:/app/enterprise/app/services/llm/legacy_base_open_ai_service.rb:ro'
     depends_on:
       - postgres
       - redis
@@ -60,6 +61,7 @@ services:
     pull_policy: always
     volumes:
       - 'storage:/app/storage'
+      - '/tmp/legacy_base_open_ai_service_fixed.rb:/app/enterprise/app/services/llm/legacy_base_open_ai_service.rb:ro'
     depends_on:
       - postgres
       - redis

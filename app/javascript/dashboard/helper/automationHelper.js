@@ -286,7 +286,7 @@ export const getInputType = (
     return getCustomAttributeInputType(customAttribute.attribute_display_type);
   }
   const type = getAutomationType(automationTypes, automation, key);
-  return type.inputType;
+  return type?.inputType ?? '';
 };
 
 /**
@@ -313,7 +313,7 @@ export const getOperators = (
   
   // Fall back to standard automation types for non-custom attributes
   const type = getAutomationType(automationTypes, automation, key);
-  return type?.filterOperators || OPERATOR_TYPES_1;
+  return type?.filterOperators ?? [];
 };
 
 /**
@@ -324,9 +324,10 @@ export const getOperators = (
  * @returns {string} The custom attribute type.
  */
 export const getCustomAttributeType = (automationTypes, automation, key) => {
-  return automationTypes[automation.event_name].conditions.find(
-    i => i.key === key
-  ).customAttributeType;
+  return (
+    automationTypes[automation.event_name].conditions.find(i => i.key === key)
+      ?.customAttributeType ?? ''
+  );
 };
 
 /**
@@ -338,6 +339,6 @@ export const getCustomAttributeType = (automationTypes, automation, key) => {
 export const showActionInput = (automationActionTypes, action) => {
   if (action === 'send_email_to_team' || action === 'send_message')
     return false;
-  const type = automationActionTypes.find(i => i.key === action).inputType;
+  const type = automationActionTypes.find(i => i.key === action)?.inputType;
   return !!type;
 };

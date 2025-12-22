@@ -2,7 +2,7 @@ version: '3'
 
 services:
   rails:
-    image: 'ghcr.io/fazer-ai/chatwoot:latest'
+    image: 'ghcr.io/fazer-ai/chatwoot:v4.9.0-fazer-ai.8-ee'
     pull_policy: always
     volumes:
       - 'storage:/app/storage'
@@ -56,7 +56,7 @@ services:
       retries: 10
 
   sidekiq:
-    image: 'ghcr.io/fazer-ai/chatwoot:latest'
+    image: 'ghcr.io/fazer-ai/chatwoot:v4.9.0-fazer-ai.8-ee'
     pull_policy: always
     volumes:
       - 'storage:/app/storage'

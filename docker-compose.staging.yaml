@@ -21,7 +21,15 @@ services:
           git clone -b $${GIT_BRANCH} $${GIT_REPO} .
         fi
         echo "Code synced to /code"
+        # Keep container running briefly to ensure volume is ready
+        sleep 2
     restart: "no"
+    healthcheck:
+      test: ["CMD", "test", "-d", "/code/.git"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   rails:
     image: 'ghcr.io/fazer-ai/chatwoot:v4.8.0-fazer-ai.6-ee'
@@ -60,7 +68,12 @@ services:
       - sh
       - '-c'
       - |
-        # Copy custom files if they exist
+        # Wait for code-sync to complete
+        while [ ! -d /code/.git ]; do
+          echo "Waiting for code-sync..."
+          sleep 2
+        done
+        # Copy custom files
         if [ -d /code ]; then
           echo "Syncing custom files..."
           [ -f /code/app/javascript/dashboard/helper/automationHelper.js ] && cp /code/app/javascript/dashboard/helper/automationHelper.js /app/app/javascript/dashboard/helper/automationHelper.js || true
@@ -70,17 +83,8 @@ services:
           [ -f /code/enterprise/app/services/captain/llm/pdf_processing_service.rb ] && cp /code/enterprise/app/services/captain/llm/pdf_processing_service.rb /app/enterprise/app/services/captain/llm/pdf_processing_service.rb || true
           echo "Custom files synced"
         fi
-        # Run original entrypoint with command
-        exec docker/entrypoints/rails.sh "$@"
-    command:
-      - bundle
-      - exec
-      - rails
-      - s
-      - '-p'
-      - '3000'
-      - '-b'
-      - 0.0.0.0
+        # Run original entrypoint - pass command as separate arguments
+        exec docker/entrypoints/rails.sh bundle exec rails s -p 3000 -b 0.0.0.0
     restart: always
     post_start:
       -
@@ -148,7 +152,12 @@ services:
       - sh
       - '-c'
       - |
-        # Copy custom files if they exist
+        # Wait for code-sync to complete
+        while [ ! -d /code/.git ]; do
+          echo "Waiting for code-sync..."
+          sleep 2
+        done
+        # Copy custom files
         if [ -d /code ]; then
           echo "Syncing custom files..."
           [ -f /code/app/services/filter_service.rb ] && cp /code/app/services/filter_service.rb /app/app/services/filter_service.rb || true
@@ -157,7 +166,7 @@ services:
           echo "Custom files synced"
         fi
         # Run sidekiq
-        bundle exec sidekiq -C config/sidekiq.yml
+        exec bundle exec sidekiq -C config/sidekiq.yml
     restart: always
     healthcheck:
       test:

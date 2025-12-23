@@ -87,7 +87,11 @@ services:
           [ -f /code/enterprise/app/services/llm/legacy_base_open_ai_service.rb ] && cp /code/enterprise/app/services/llm/legacy_base_open_ai_service.rb /app/enterprise/app/services/llm/legacy_base_open_ai_service.rb || true
           [ -f /code/enterprise/app/services/captain/llm/pdf_processing_service.rb ] && cp /code/enterprise/app/services/captain/llm/pdf_processing_service.rb /app/enterprise/app/services/captain/llm/pdf_processing_service.rb || true
           # Integrations module (required by pdf_processing_service)
-          [ -d /code/lib/integrations ] && cp -r /code/lib/integrations/* /app/lib/integrations/ 2>/dev/null || true
+          if [ -d /code/lib/integrations ]; then
+            mkdir -p /app/lib/integrations
+            cp -r /code/lib/integrations/* /app/lib/integrations/ 2>/dev/null || true
+            echo "✓ Synced lib/integrations module"
+          fi
           echo "Custom files synced"
         fi
         # Run original entrypoint - pass command as separate arguments
@@ -155,7 +159,11 @@ services:
           [ -f /code/enterprise/app/services/llm/legacy_base_open_ai_service.rb ] && cp /code/enterprise/app/services/llm/legacy_base_open_ai_service.rb /app/enterprise/app/services/llm/legacy_base_open_ai_service.rb || true
           [ -f /code/enterprise/app/services/captain/llm/pdf_processing_service.rb ] && cp /code/enterprise/app/services/captain/llm/pdf_processing_service.rb /app/enterprise/app/services/captain/llm/pdf_processing_service.rb || true
           # Integrations module (required by pdf_processing_service)
-          [ -d /code/lib/integrations ] && cp -r /code/lib/integrations/* /app/lib/integrations/ 2>/dev/null || true
+          if [ -d /code/lib/integrations ]; then
+            mkdir -p /app/lib/integrations
+            cp -r /code/lib/integrations/* /app/lib/integrations/ 2>/dev/null || true
+            echo "✓ Synced lib/integrations module"
+          fi
           echo "Custom files synced"
         fi
         # Run sidekiq

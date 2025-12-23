@@ -11,11 +11,12 @@ services:
     volumes:
       - 'storage:/app/storage'
       # Mount custom files from host (prepare them first with prepare_staging_files.sh)
-      # Set STAGING_PATCHES_DIR env var in Coolify (e.g., /home/azureuser/chatwoot-staging-patches)
-      - ${STAGING_PATCHES_DIR}/app:/app/app:ro
-      - ${STAGING_PATCHES_DIR}/config:/app/config:ro
-      - ${STAGING_PATCHES_DIR}/enterprise:/app/enterprise:ro
-      - ${STAGING_PATCHES_DIR}/lib:/app/lib:ro
+      # IMPORTANT: Replace /home/azureuser/chatwoot-staging-patches with your actual path
+      # Or set STAGING_PATCHES_DIR env var and Coolify will replace it
+      - /home/azureuser/chatwoot-staging-patches/app:/app/app:ro
+      - /home/azureuser/chatwoot-staging-patches/config:/app/config:ro
+      - /home/azureuser/chatwoot-staging-patches/enterprise:/app/enterprise:ro
+      - /home/azureuser/chatwoot-staging-patches/lib:/app/lib:ro
     depends_on:
       - postgres
       - redis
@@ -67,10 +68,10 @@ services:
     volumes:
       - 'storage:/app/storage'
       # Mount custom files from host (same as rails)
-      - ${STAGING_PATCHES_DIR}/app:/app/app:ro
-      - ${STAGING_PATCHES_DIR}/config:/app/config:ro
-      - ${STAGING_PATCHES_DIR}/enterprise:/app/enterprise:ro
-      - ${STAGING_PATCHES_DIR}/lib:/app/lib:ro
+      - /home/azureuser/chatwoot-staging-patches/app:/app/app:ro
+      - /home/azureuser/chatwoot-staging-patches/config:/app/config:ro
+      - /home/azureuser/chatwoot-staging-patches/enterprise:/app/enterprise:ro
+      - /home/azureuser/chatwoot-staging-patches/lib:/app/lib:ro
     depends_on:
       - postgres
       - redis

@@ -50,11 +50,24 @@
 - **Raison** : Mise à jour de la version pour refléter votre fork
 - **Impact** : Affichage de la version dans l'interface Chatwoot
 
-### 5. **Configuration Docker**
+### 5. **Support Azure OpenAI (Patch via Volume Mount)**
+
+#### Fichier monté : `/opt/chatwoot-patches/enterprise/app/services/llm/base_open_ai_service.rb`
+- **Raison** : Patch pour supporter Azure OpenAI au lieu d'OpenAI standard
+- **Impact** : Permet d'utiliser Azure OpenAI pour Captain AI
+- **Méthode** : Montage de fichier en read-only dans Coolify (pas dans docker-compose)
+- **Localisation** : `/opt/chatwoot-patches/enterprise/app/services/llm/base_open_ai_service.rb` → `/app/enterprise/app/services/llm/base_open_ai_service.rb`
+- **Note** : Ce fichier est monté directement dans Coolify, pas dans le docker-compose
+
+### 6. **Configuration Docker**
 
 #### `docker-compose.coolify.yaml`
 - **Raison** : Configuration spécifique pour votre déploiement Coolify
 - **Impact** : Déploiement automatisé avec vos paramètres
+- **Volumes personnalisés ajoutés dans Coolify** (pas dans le fichier) :
+  - `assets:/app/public/assets` (persiste les assets compilés)
+  - `enterprise:/app/enterprise` (montage du dossier Enterprise)
+  - Fichier Azure OpenAI patch (monté en read-only)
 
 #### `docker/Dockerfile`
 - **Raison** : Modification pour rendre `git rev-parse HEAD` optionnel
@@ -73,8 +86,8 @@
 ### ✅ **OUI, vous avez besoin d'un fork si :**
 1. **Filtres d'automation personnalisés** : C'est votre fonctionnalité principale et elle nécessite des modifications dans le code JavaScript et Ruby
 2. **Activation Enterprise Edition** : Vous déverrouillez les fonctionnalités Enterprise (SLA, audit logs, Captain AI, etc.)
-3. **Support Azure OpenAI** : Vous utilisez Azure au lieu d'OpenAI standard
-4. **Déploiements personnalisés** : Vous avez des configurations Docker spécifiques
+3. **Support Azure OpenAI** : Vous utilisez Azure au lieu d'OpenAI standard (actuellement via patch monté, mais devrait être dans le code)
+4. **Déploiements personnalisés** : Vous avez des configurations Docker spécifiques et des volumes personnalisés
 
 ### ❌ **NON, vous pourriez éviter un fork si :**
 1. Les filtres personnalisés peuvent être ajoutés via des plugins/extensions (si Chatwoot le supporte)
@@ -125,7 +138,8 @@ git diff upstream/main...origin/main -- enterprise/app/services/captain/llm/pdf_
 **Vous avez absolument besoin d'un fork** car :
 - **Les filtres d'automation personnalisés** nécessitent des modifications dans le code JavaScript et Ruby
 - **L'activation Enterprise Edition** nécessite de modifier la configuration `INSTALLATION_PRICING_PLAN` et d'activer les features pour tous les comptes
-- **Le support Azure OpenAI** nécessite des modifications dans le service PDF
+- **Le support Azure OpenAI** nécessite des modifications dans les services LLM (actuellement via patch monté, mais devrait être intégré dans le code)
+- **Volumes et fichiers montés personnalisés** : `assets`, `enterprise`, et le patch Azure OpenAI sont montés directement dans Coolify
 - Ces modifications ne peuvent pas être facilement externalisées ou configurées via des variables d'environnement
 
 **Mais** vous pouvez simplifier en :

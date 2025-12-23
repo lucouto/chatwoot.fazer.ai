@@ -76,12 +76,18 @@ services:
         # Copy custom files
         if [ -d /code ]; then
           echo "Syncing custom files..."
+          # JavaScript files
           [ -f /code/app/javascript/dashboard/helper/automationHelper.js ] && cp /code/app/javascript/dashboard/helper/automationHelper.js /app/app/javascript/dashboard/helper/automationHelper.js || true
           [ -f /code/app/javascript/dashboard/routes/dashboard/settings/automation/operators.js ] && cp /code/app/javascript/dashboard/routes/dashboard/settings/automation/operators.js /app/app/javascript/dashboard/routes/dashboard/settings/automation/operators.js || true
+          # Ruby service files
           [ -f /code/app/services/filter_service.rb ] && cp /code/app/services/filter_service.rb /app/app/services/filter_service.rb || true
+          # Config files
           [ -f /code/config/app.yml ] && cp /code/config/app.yml /app/config/app.yml || true
+          # Enterprise LLM services
           [ -f /code/enterprise/app/services/llm/legacy_base_open_ai_service.rb ] && cp /code/enterprise/app/services/llm/legacy_base_open_ai_service.rb /app/enterprise/app/services/llm/legacy_base_open_ai_service.rb || true
           [ -f /code/enterprise/app/services/captain/llm/pdf_processing_service.rb ] && cp /code/enterprise/app/services/captain/llm/pdf_processing_service.rb /app/enterprise/app/services/captain/llm/pdf_processing_service.rb || true
+          # Integrations module (required by pdf_processing_service)
+          [ -d /code/lib/integrations ] && cp -r /code/lib/integrations/* /app/lib/integrations/ 2>/dev/null || true
           echo "Custom files synced"
         fi
         # Run original entrypoint - pass command as separate arguments
@@ -141,10 +147,15 @@ services:
         # Copy custom files
         if [ -d /code ]; then
           echo "Syncing custom files..."
+          # Ruby service files
           [ -f /code/app/services/filter_service.rb ] && cp /code/app/services/filter_service.rb /app/app/services/filter_service.rb || true
+          # Config files
           [ -f /code/config/app.yml ] && cp /code/config/app.yml /app/config/app.yml || true
+          # Enterprise LLM services
           [ -f /code/enterprise/app/services/llm/legacy_base_open_ai_service.rb ] && cp /code/enterprise/app/services/llm/legacy_base_open_ai_service.rb /app/enterprise/app/services/llm/legacy_base_open_ai_service.rb || true
           [ -f /code/enterprise/app/services/captain/llm/pdf_processing_service.rb ] && cp /code/enterprise/app/services/captain/llm/pdf_processing_service.rb /app/enterprise/app/services/captain/llm/pdf_processing_service.rb || true
+          # Integrations module (required by pdf_processing_service)
+          [ -d /code/lib/integrations ] && cp -r /code/lib/integrations/* /app/lib/integrations/ 2>/dev/null || true
           echo "Custom files synced"
         fi
         # Run sidekiq

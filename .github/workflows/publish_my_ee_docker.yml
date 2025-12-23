@@ -53,11 +53,13 @@ jobs:
             echo "DOCKER_TAG_LATEST=${GITHUB_REPO}:latest-ee" >> $GITHUB_ENV
           else
             # If tag already ends with -ee, don't append another -ee
-            if [[ "$SANITIZED_REF" == *"-ee" ]]; then
-              echo "DOCKER_TAG=${GITHUB_REPO}:${SANITIZED_REF}" >> $GITHUB_ENV
+            # Use case-insensitive check and handle both -ee and -EE
+            if echo "$SANITIZED_REF" | grep -qE '(-ee|-EE)$'; then
+              FINAL_TAG="${SANITIZED_REF}"
             else
-              echo "DOCKER_TAG=${GITHUB_REPO}:${SANITIZED_REF}-ee" >> $GITHUB_ENV
+              FINAL_TAG="${SANITIZED_REF}-ee"
             fi
+            echo "DOCKER_TAG=${GITHUB_REPO}:${FINAL_TAG}" >> $GITHUB_ENV
             echo "DOCKER_TAG_LATEST=" >> $GITHUB_ENV
           fi
 
@@ -135,7 +137,7 @@ jobs:
           else
             SANITIZED_REF=$(echo "$GIT_REF" | sed 's/\//-/g')
             # If tag already ends with -ee, don't append another -ee
-            if [[ "$SANITIZED_REF" == *"-ee" ]]; then
+            if echo "$SANITIZED_REF" | grep -qE '(-ee|-EE)$'; then
               FINAL_TAG="${SANITIZED_REF}"
             else
               FINAL_TAG="${SANITIZED_REF}-ee"
@@ -156,7 +158,7 @@ jobs:
           else
             SANITIZED_REF=$(echo "$GIT_REF" | sed 's/\//-/g')
             # If tag already ends with -ee, don't append another -ee
-            if [[ "$SANITIZED_REF" == *"-ee" ]]; then
+            if echo "$SANITIZED_REF" | grep -qE '(-ee|-EE)$'; then
               FINAL_TAG="${SANITIZED_REF}"
             else
               FINAL_TAG="${SANITIZED_REF}-ee"

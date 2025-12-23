@@ -15,9 +15,23 @@ Simplifier le déploiement staging en utilisant la même approche que la product
 
 ## 🚀 Installation
 
-### Étape 1 : Préparer les fichiers personnalisés sur le serveur
+### Étape 1 : Créer le dossier de patches (avec permissions)
 
 SSH dans votre serveur Coolify et exécutez :
+
+```bash
+# Créer le dossier avec les bonnes permissions
+sudo mkdir -p /opt/chatwoot-staging-patches
+sudo chown -R $USER:$USER /opt/chatwoot-staging-patches
+```
+
+**Alternative** (si vous n'avez pas sudo) : Utilisez un dossier dans votre home :
+```bash
+mkdir -p ~/chatwoot-staging-patches
+# Puis dans Coolify, définissez STAGING_PATCHES_DIR=/home/$USER/chatwoot-staging-patches
+```
+
+### Étape 2 : Préparer les fichiers personnalisés
 
 ```bash
 # Cloner votre repo (si pas déjà fait)
@@ -34,7 +48,7 @@ Le script va :
 - Copier tous les fichiers personnalisés dans `/opt/chatwoot-staging-patches/`
 - Créer la structure de dossiers nécessaire
 
-### Étape 2 : Configurer Coolify
+### Étape 3 : Configurer Coolify
 
 1. **Dans Coolify**, allez dans votre projet staging
 2. **Remplacez** `docker-compose.staging.yaml` par `docker-compose.staging-simple.yaml`
@@ -42,7 +56,7 @@ Le script va :
    - Nom : `STAGING_PATCHES_DIR`
    - Valeur : `/opt/chatwoot-staging-patches`
 
-### Étape 3 : Déployer
+### Étape 4 : Déployer
 
 1. **Redeployez** dans Coolify
 2. Les fichiers personnalisés seront automatiquement montés depuis `/opt/chatwoot-staging-patches/`

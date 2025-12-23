@@ -52,7 +52,12 @@ jobs:
             echo "DOCKER_TAG=${GITHUB_REPO}:main-ee" >> $GITHUB_ENV
             echo "DOCKER_TAG_LATEST=${GITHUB_REPO}:latest-ee" >> $GITHUB_ENV
           else
-            echo "DOCKER_TAG=${GITHUB_REPO}:${SANITIZED_REF}-ee" >> $GITHUB_ENV
+            # If tag already ends with -ee, don't append another -ee
+            if [[ "$SANITIZED_REF" == *"-ee" ]]; then
+              echo "DOCKER_TAG=${GITHUB_REPO}:${SANITIZED_REF}" >> $GITHUB_ENV
+            else
+              echo "DOCKER_TAG=${GITHUB_REPO}:${SANITIZED_REF}-ee" >> $GITHUB_ENV
+            fi
             echo "DOCKER_TAG_LATEST=" >> $GITHUB_ENV
           fi
 
@@ -129,8 +134,14 @@ jobs:
               $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
           else
             SANITIZED_REF=$(echo "$GIT_REF" | sed 's/\//-/g')
+            # If tag already ends with -ee, don't append another -ee
+            if [[ "$SANITIZED_REF" == *"-ee" ]]; then
+              FINAL_TAG="${SANITIZED_REF}"
+            else
+              FINAL_TAG="${SANITIZED_REF}-ee"
+            fi
             docker buildx imagetools create \
-              -t ghcr.io/${{ github.repository }}:${SANITIZED_REF}-ee \
+              -t ghcr.io/${{ github.repository }}:${FINAL_TAG} \
               $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
           fi
 
@@ -144,7 +155,13 @@ jobs:
             docker buildx imagetools inspect ${REPO}:latest-ee
           else
             SANITIZED_REF=$(echo "$GIT_REF" | sed 's/\//-/g')
+            # If tag already ends with -ee, don't append another -ee
+            if [[ "$SANITIZED_REF" == *"-ee" ]]; then
+              FINAL_TAG="${SANITIZED_REF}"
+            else
+              FINAL_TAG="${SANITIZED_REF}-ee"
+            fi
             REPO="ghcr.io/${{ github.repository }}"
-            docker buildx imagetools inspect ${REPO}:${SANITIZED_REF}-ee
+            docker buildx imagetools inspect ${REPO}:${FINAL_TAG}
           fi
 

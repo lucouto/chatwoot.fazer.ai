@@ -10,8 +10,26 @@ REPO_DIR="${REPO_DIR:-/tmp/chatwoot-staging-repo}"
 echo "🔧 Preparing staging customizations..."
 echo "========================================"
 
-# Create staging patches directory
-mkdir -p "${STAGING_PATCHES_DIR}"
+# Create staging patches directory (with sudo if needed)
+if [ ! -d "${STAGING_PATCHES_DIR}" ]; then
+    echo "📁 Creating staging patches directory..."
+    if mkdir -p "${STAGING_PATCHES_DIR}" 2>/dev/null; then
+        echo "   ✅ Created: ${STAGING_PATCHES_DIR}"
+    else
+        echo "   ⚠️  Permission denied, trying with sudo..."
+        if sudo mkdir -p "${STAGING_PATCHES_DIR}"; then
+            sudo chown -R $USER:$USER "${STAGING_PATCHES_DIR}" 2>/dev/null || true
+            echo "   ✅ Created with sudo: ${STAGING_PATCHES_DIR}"
+        else
+            echo "   ❌ Could not create directory. Please run:"
+            echo "      sudo mkdir -p ${STAGING_PATCHES_DIR}"
+            echo "      sudo chown -R $USER:$USER ${STAGING_PATCHES_DIR}"
+            exit 1
+        fi
+    fi
+else
+    echo "   ✅ Directory already exists: ${STAGING_PATCHES_DIR}"
+fi
 
 # Clone or update repo if needed
 if [ ! -d "${REPO_DIR}/.git" ]; then

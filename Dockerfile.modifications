@@ -1,0 +1,49 @@
+# Dockerfile Modifications for Enterprise Unlock
+# 
+# This file shows the modifications needed in the Dockerfile
+# to build a custom image with Enterprise features unlocked.
+#
+# You don't need to modify the Dockerfile itself - instead,
+# apply the code changes BEFORE building the image.
+
+# ============================================================
+# STEP 1: Apply Code Modifications
+# ============================================================
+# 
+# Before building, ensure these files are modified:
+#
+# 1. enterprise/app/services/internal/reconcile_plan_config_service.rb
+#    - Comment out feature disabling logic
+#
+# 2. lib/chatwoot_hub.rb
+#    - Change default pricing plan to 'enterprise'
+#
+# ============================================================
+# STEP 2: Build Custom Image
+# ============================================================
+#
+# docker build -t your-registry/chatwoot:enterprise-unlocked \
+#   -f docker/Dockerfile .
+#
+# ============================================================
+# STEP 3: Push to Registry
+# ============================================================
+#
+# docker push your-registry/chatwoot:enterprise-unlocked
+#
+# ============================================================
+# STEP 4: Update Coolify
+# ============================================================
+#
+# In Coolify, change the image in docker-compose.coolify.yaml:
+#   image: 'your-registry/chatwoot:enterprise-unlocked'
+#
+# And change pull_policy from 'always' to 'if_not_present'
+#
+# ============================================================
+
+# No actual Dockerfile content needed - the standard Dockerfile
+# from fazer-ai will work fine. Just apply code modifications
+# before building.
+
+

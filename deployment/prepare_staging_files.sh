@@ -4,28 +4,34 @@
 
 set -e
 
-STAGING_PATCHES_DIR="${STAGING_PATCHES_DIR:-/opt/chatwoot-staging-patches}"
+# Default to home directory if /opt is not accessible
+if [ -w "/opt" ] 2>/dev/null; then
+    DEFAULT_PATCHES_DIR="/opt/chatwoot-staging-patches"
+else
+    DEFAULT_PATCHES_DIR="${HOME}/chatwoot-staging-patches"
+fi
+
+STAGING_PATCHES_DIR="${STAGING_PATCHES_DIR:-${DEFAULT_PATCHES_DIR}}"
 REPO_DIR="${REPO_DIR:-/tmp/chatwoot-staging-repo}"
 
 echo "🔧 Preparing staging customizations..."
 echo "========================================"
+echo "📁 Using directory: ${STAGING_PATCHES_DIR}"
 
-# Create staging patches directory (with sudo if needed)
+# Create staging patches directory
 if [ ! -d "${STAGING_PATCHES_DIR}" ]; then
     echo "📁 Creating staging patches directory..."
     if mkdir -p "${STAGING_PATCHES_DIR}" 2>/dev/null; then
         echo "   ✅ Created: ${STAGING_PATCHES_DIR}"
     else
-        echo "   ⚠️  Permission denied, trying with sudo..."
-        if sudo mkdir -p "${STAGING_PATCHES_DIR}"; then
-            sudo chown -R $USER:$USER "${STAGING_PATCHES_DIR}" 2>/dev/null || true
-            echo "   ✅ Created with sudo: ${STAGING_PATCHES_DIR}"
-        else
-            echo "   ❌ Could not create directory. Please run:"
-            echo "      sudo mkdir -p ${STAGING_PATCHES_DIR}"
-            echo "      sudo chown -R $USER:$USER ${STAGING_PATCHES_DIR}"
-            exit 1
-        fi
+        echo "   ❌ Could not create directory: ${STAGING_PATCHES_DIR}"
+        echo ""
+        echo "   💡 Try one of these:"
+        echo "      1. Create manually: mkdir -p ${STAGING_PATCHES_DIR}"
+        echo "      2. Or use a different location:"
+        echo "         export STAGING_PATCHES_DIR=~/my-custom-patches"
+        echo "         ./deployment/prepare_staging_files.sh"
+        exit 1
     fi
 else
     echo "   ✅ Directory already exists: ${STAGING_PATCHES_DIR}"

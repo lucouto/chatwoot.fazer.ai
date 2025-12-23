@@ -11,10 +11,11 @@ services:
     volumes:
       - 'storage:/app/storage'
       # Mount custom files from host (prepare them first with prepare_staging_files.sh)
-      - '${STAGING_PATCHES_DIR:-/opt/chatwoot-staging-patches}/app:/app/app:ro'
-      - '${STAGING_PATCHES_DIR:-/opt/chatwoot-staging-patches}/config:/app/config:ro'
-      - '${STAGING_PATCHES_DIR:-/opt/chatwoot-staging-patches}/enterprise:/app/enterprise:ro'
-      - '${STAGING_PATCHES_DIR:-/opt/chatwoot-staging-patches}/lib:/app/lib:ro'
+      # Default: ~/chatwoot-staging-patches (or set STAGING_PATCHES_DIR env var)
+      - '${STAGING_PATCHES_DIR:-/home/${USER}/chatwoot-staging-patches}/app:/app/app:ro'
+      - '${STAGING_PATCHES_DIR:-/home/${USER}/chatwoot-staging-patches}/config:/app/config:ro'
+      - '${STAGING_PATCHES_DIR:-/home/${USER}/chatwoot-staging-patches}/enterprise:/app/enterprise:ro'
+      - '${STAGING_PATCHES_DIR:-/home/${USER}/chatwoot-staging-patches}/lib:/app/lib:ro'
     depends_on:
       - postgres
       - redis
@@ -66,10 +67,10 @@ services:
     volumes:
       - 'storage:/app/storage'
       # Mount custom files from host (same as rails)
-      - '${STAGING_PATCHES_DIR:-/opt/chatwoot-staging-patches}/app:/app/app:ro'
-      - '${STAGING_PATCHES_DIR:-/opt/chatwoot-staging-patches}/config:/app/config:ro'
-      - '${STAGING_PATCHES_DIR:-/opt/chatwoot-staging-patches}/enterprise:/app/enterprise:ro'
-      - '${STAGING_PATCHES_DIR:-/opt/chatwoot-staging-patches}/lib:/app/lib:ro'
+      - '${STAGING_PATCHES_DIR:-/home/${USER}/chatwoot-staging-patches}/app:/app/app:ro'
+      - '${STAGING_PATCHES_DIR:-/home/${USER}/chatwoot-staging-patches}/config:/app/config:ro'
+      - '${STAGING_PATCHES_DIR:-/home/${USER}/chatwoot-staging-patches}/enterprise:/app/enterprise:ro'
+      - '${STAGING_PATCHES_DIR:-/home/${USER}/chatwoot-staging-patches}/lib:/app/lib:ro'
     depends_on:
       - postgres
       - redis

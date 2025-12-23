@@ -87,28 +87,8 @@ services:
         # Run original entrypoint - pass command as separate arguments
         exec docker/entrypoints/rails.sh bundle exec rails s -p 3000 -b 0.0.0.0
     restart: always
-    post_start:
-      -
-        command:
-          - sh
-          - '-c'
-          - |
-            echo "Running post_start hook..."
-            for i in 1 2 3; do
-              if bundle exec rails db:chatwoot_prepare; then
-                bundle exec rails branding:update
-                if [ -n "$${BRAND_ASSETS_URL}" ]; then
-                  deployment/extract_brand_assets.sh "$${BRAND_ASSETS_URL}"
-                fi
-                echo "Post-start hook completed successfully"
-                exit 0
-              else
-                echo "Database setup attempt $i/3 failed, retrying in 10s..."
-                sleep 10
-              fi
-            done
-            echo "Post-start hook failed after 3 attempts"
-            exit 1
+    # Note: db:chatwoot_prepare should be run manually via Coolify terminal after first deployment
+    # Example: docker exec <rails-container> bundle exec rails db:chatwoot_prepare
     healthcheck:
       test:
         - CMD-SHELL

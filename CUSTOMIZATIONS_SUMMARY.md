@@ -28,13 +28,29 @@
 - **Raison** : Support pour Azure OpenAI (au lieu d'OpenAI standard)
 - **Impact** : Permet d'utiliser Azure OpenAI pour le traitement de PDF
 
-### 3. **Configuration de Version**
+### 3. **Activation Enterprise Edition**
+
+#### `unlock_enterprise.rb`
+- **Raison** : Script pour déverrouiller les fonctionnalités Enterprise Edition
+- **Impact** : Active les fonctionnalités premium (SLA, audit logs, Captain AI, custom roles, etc.)
+- **Fonctionnalités activées** :
+  - `disable_branding`
+  - `audit_logs`
+  - `sla`
+  - `captain_integration`
+  - `custom_roles`
+
+#### `ENTERPRISE_UNLOCK_ANALYSIS.md`
+- **Raison** : Documentation sur le processus de déverrouillage Enterprise
+- **Impact** : Guide pour activer les fonctionnalités Enterprise
+
+### 4. **Configuration de Version**
 
 #### `config/app.yml`
 - **Raison** : Mise à jour de la version pour refléter votre fork
 - **Impact** : Affichage de la version dans l'interface Chatwoot
 
-### 4. **Configuration Docker**
+### 5. **Configuration Docker**
 
 #### `docker-compose.coolify.yaml`
 - **Raison** : Configuration spécifique pour votre déploiement Coolify
@@ -56,8 +72,9 @@
 
 ### ✅ **OUI, vous avez besoin d'un fork si :**
 1. **Filtres d'automation personnalisés** : C'est votre fonctionnalité principale et elle nécessite des modifications dans le code JavaScript et Ruby
-2. **Support Azure OpenAI** : Vous utilisez Azure au lieu d'OpenAI standard
-3. **Déploiements personnalisés** : Vous avez des configurations Docker spécifiques
+2. **Activation Enterprise Edition** : Vous déverrouillez les fonctionnalités Enterprise (SLA, audit logs, Captain AI, etc.)
+3. **Support Azure OpenAI** : Vous utilisez Azure au lieu d'OpenAI standard
+4. **Déploiements personnalisés** : Vous avez des configurations Docker spécifiques
 
 ### ❌ **NON, vous pourriez éviter un fork si :**
 1. Les filtres personnalisés peuvent être ajoutés via des plugins/extensions (si Chatwoot le supporte)
@@ -105,10 +122,11 @@ git diff upstream/main...origin/main -- enterprise/app/services/captain/llm/pdf_
 
 ## 💡 Conclusion
 
-**Vous avez probablement besoin d'un fork** car :
-- Les filtres d'automation personnalisés nécessitent des modifications dans le code JavaScript et Ruby
-- Ces modifications ne peuvent pas être facilement externalisées
-- Le support Azure OpenAI nécessite des modifications dans le service PDF
+**Vous avez absolument besoin d'un fork** car :
+- **Les filtres d'automation personnalisés** nécessitent des modifications dans le code JavaScript et Ruby
+- **L'activation Enterprise Edition** nécessite de modifier la configuration `INSTALLATION_PRICING_PLAN` et d'activer les features pour tous les comptes
+- **Le support Azure OpenAI** nécessite des modifications dans le service PDF
+- Ces modifications ne peuvent pas être facilement externalisées ou configurées via des variables d'environnement
 
 **Mais** vous pouvez simplifier en :
 - Externalisant les configurations Docker

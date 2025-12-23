@@ -5,10 +5,16 @@ permissions:
   packages: write
 
 on:
-  push:
-    branches:
-      - main
+  # Only build on manual trigger or tags/releases
+  # Comment out the push trigger to avoid automatic builds on every commit
+  # push:
+  #   branches:
+  #     - main
   workflow_dispatch:
+  # Build on tags (e.g., v1.0.0)
+  push:
+    tags:
+      - 'v*'
 
 env:
   GITHUB_REPO: ghcr.io/${{ github.repository }}

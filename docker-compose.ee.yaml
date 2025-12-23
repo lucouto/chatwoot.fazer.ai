@@ -32,12 +32,12 @@ services:
       - 'BAILEYS_PROVIDER_DEFAULT_URL=http://baileys-api:3025'
       - 'BAILEYS_PROVIDER_DEFAULT_API_KEY=${SERVICE_PASSWORD_64_BAILEYSDEFAULTAPIKEY}'
       - BAILEYS_PROVIDER_USE_INTERNAL_HOST_URL=true
-      - SMTP_ADDRESS=smtp.gmail.com
-      - SMTP_PORT=587
-      - SMTP_USERNAME=chatwoot@cheminneuf.church
-      - SMTP_PASSWORD=obswlqfuqanyoked
-      - SMTP_AUTHENTICATION=login
-      - SMTP_ENABLE_STARTTLS_AUTO=true
+      - 'SMTP_ADDRESS=${SMTP_ADDRESS:-smtp.gmail.com}'
+      - 'SMTP_PORT=${SMTP_PORT:-587}'
+      - 'SMTP_USERNAME=${SMTP_USERNAME}'
+      - 'SMTP_PASSWORD=${SMTP_PASSWORD}'
+      - 'SMTP_AUTHENTICATION=${SMTP_AUTHENTICATION:-login}'
+      - 'SMTP_ENABLE_STARTTLS_AUTO=${SMTP_ENABLE_STARTTLS_AUTO:-true}'
       - MAIL_SENDER=chatwoot@cheminneuf.church
       - BAILEYS_CLIENT_VERSION=2.3000.1027934701
     entrypoint: docker/entrypoints/rails.sh
@@ -98,12 +98,12 @@ services:
       - 'BAILEYS_PROVIDER_DEFAULT_URL=http://baileys-api:3025'
       - 'BAILEYS_PROVIDER_DEFAULT_API_KEY=${SERVICE_PASSWORD_64_BAILEYSDEFAULTAPIKEY}'
       - BAILEYS_PROVIDER_USE_INTERNAL_HOST_URL=true
-      - SMTP_ADDRESS=smtp.gmail.com
-      - SMTP_PORT=587
-      - SMTP_USERNAME=chatwoot@cheminneuf.church
-      - SMTP_PASSWORD=obswlqfuqanyoked
-      - SMTP_AUTHENTICATION=login
-      - SMTP_ENABLE_STARTTLS_AUTO=true
+      - 'SMTP_ADDRESS=${SMTP_ADDRESS:-smtp.gmail.com}'
+      - 'SMTP_PORT=${SMTP_PORT:-587}'
+      - 'SMTP_USERNAME=${SMTP_USERNAME}'
+      - 'SMTP_PASSWORD=${SMTP_PASSWORD}'
+      - 'SMTP_AUTHENTICATION=${SMTP_AUTHENTICATION:-login}'
+      - 'SMTP_ENABLE_STARTTLS_AUTO=${SMTP_ENABLE_STARTTLS_AUTO:-true}'
       - MAIL_SENDER=chatwoot@cheminneuf.church
     command:
       - bundle

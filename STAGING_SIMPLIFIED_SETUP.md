@@ -46,10 +46,11 @@ Le script va :
 
 1. **Dans Coolify**, allez dans votre projet staging
 2. **Remplacez** `docker-compose.staging.yaml` par `docker-compose.staging-simple.yaml`
-3. **Ajoutez** la variable d'environnement (optionnel, le script détecte automatiquement) :
+3. **Ajoutez** la variable d'environnement (OBLIGATOIRE) :
    - Nom : `STAGING_PATCHES_DIR`
-   - Valeur : `/home/votre-utilisateur/chatwoot-staging-patches` (remplacez `votre-utilisateur` par votre nom d'utilisateur, ex: `azureuser`)
-   - **Note** : Si vous ne définissez pas cette variable, le script utilisera `~/chatwoot-staging-patches` par défaut
+   - Valeur : Le chemin complet vers le dossier de patches créé par le script
+   - **Exemple** : Si vous êtes `azureuser`, utilisez `/home/azureuser/chatwoot-staging-patches`
+   - **Pour trouver votre chemin** : Le script affichera le chemin utilisé à la fin
 
 ### Étape 4 : Déployer
 

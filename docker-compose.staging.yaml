@@ -1,15 +1,40 @@
 version: '3'
 
 services:
+  code-sync:
+    image: 'alpine/git:latest'
+    volumes:
+      - 'custom_code:/code'
+    environment:
+      - 'GIT_REPO=${GIT_REPO:-https://github.com/lucouto/chatwoot.fazer.ai.git}'
+      - 'GIT_BRANCH=${GIT_BRANCH:-main}'
+    command:
+      - sh
+      - '-c'
+      - |
+        cd /code
+        if [ -d .git ]; then
+          git fetch origin
+          git reset --hard origin/$${GIT_BRANCH}
+        else
+          git clone -b $${GIT_BRANCH} $${GIT_REPO} .
+        fi
+        echo "Code synced to /code"
+        # Exit successfully - volume will persist
+    restart: "no"
+
   rails:
-    image: 'ghcr.io/lucouto/chatwoot.fazer.ai:main-ee'
+    image: 'ghcr.io/fazer-ai/chatwoot:v4.8.0-fazer-ai.6-ee'
     pull_policy: always
     volumes:
       - 'storage:/app/storage'
+      - 'custom_code:/code:ro'
     depends_on:
       - postgres
       - redis
+      - code-sync
     environment:
+      - 'CUSTOM_CODE_DIR=/code'
       - NODE_ENV=production
       - RAILS_ENV=production
       - INSTALLATION_ENV=docker
@@ -31,7 +56,22 @@ services:
       - 'MAILER_SENDER_EMAIL=${MAILER_SENDER_EMAIL}'
       - 'RESEND_API_KEY=${RESEND_API_KEY}'
       - 'BRAND_ASSETS_URL=${BRAND_ASSETS_URL}'
-    entrypoint: docker/entrypoints/rails.sh
+    entrypoint: 
+      - sh
+      - '-c'
+      - |
+        # Copy custom files if they exist
+        if [ -d /code ]; then
+          echo "Syncing custom files..."
+          [ -f /code/app/javascript/dashboard/helper/automationHelper.js ] && cp /code/app/javascript/dashboard/helper/automationHelper.js /app/app/javascript/dashboard/helper/automationHelper.js || true
+          [ -f /code/app/javascript/dashboard/routes/dashboard/settings/automation/operators.js ] && cp /code/app/javascript/dashboard/routes/dashboard/settings/automation/operators.js /app/app/javascript/dashboard/routes/dashboard/settings/automation/operators.js || true
+          [ -f /code/app/services/filter_service.rb ] && cp /code/app/services/filter_service.rb /app/app/services/filter_service.rb || true
+          [ -f /code/config/app.yml ] && cp /code/config/app.yml /app/config/app.yml || true
+          [ -f /code/enterprise/app/services/captain/llm/pdf_processing_service.rb ] && cp /code/enterprise/app/services/captain/llm/pdf_processing_service.rb /app/enterprise/app/services/captain/llm/pdf_processing_service.rb || true
+          echo "Custom files synced"
+        fi
+        # Run original entrypoint with command
+        exec docker/entrypoints/rails.sh "$@"
     command:
       - bundle
       - exec
@@ -57,14 +97,17 @@ services:
       retries: 10
 
   sidekiq:
-    image: 'ghcr.io/lucouto/chatwoot.fazer.ai:main-ee'
+    image: 'ghcr.io/fazer-ai/chatwoot:v4.8.0-fazer-ai.6-ee'
     pull_policy: always
     volumes:
       - 'storage:/app/storage'
+      - 'custom_code:/code:ro'
     depends_on:
       - postgres
       - redis
+      - code-sync
     environment:
+      - 'CUSTOM_CODE_DIR=/code'
       - NODE_ENV=production
       - RAILS_ENV=production
       - INSTALLATION_ENV=docker
@@ -86,11 +129,19 @@ services:
       - 'MAILER_SENDER_EMAIL=${MAILER_SENDER_EMAIL}'
       - 'RESEND_API_KEY=${RESEND_API_KEY}'
     command:
-      - bundle
-      - exec
-      - sidekiq
-      - '-C'
-      - config/sidekiq.yml
+      - sh
+      - '-c'
+      - |
+        # Copy custom files if they exist
+        if [ -d /code ]; then
+          echo "Syncing custom files..."
+          [ -f /code/app/services/filter_service.rb ] && cp /code/app/services/filter_service.rb /app/app/services/filter_service.rb || true
+          [ -f /code/config/app.yml ] && cp /code/config/app.yml /app/config/app.yml || true
+          [ -f /code/enterprise/app/services/captain/llm/pdf_processing_service.rb ] && cp /code/enterprise/app/services/captain/llm/pdf_processing_service.rb /app/enterprise/app/services/captain/llm/pdf_processing_service.rb || true
+          echo "Custom files synced"
+        fi
+        # Run sidekiq
+        bundle exec sidekiq -C config/sidekiq.yml
     restart: always
     healthcheck:
       test:
@@ -165,3 +216,4 @@ volumes:
   storage: null
   postgres: null
   redis: null
+  custom_code: null

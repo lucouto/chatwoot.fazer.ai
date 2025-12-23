@@ -10,13 +10,16 @@ services:
     pull_policy: always
     volumes:
       - 'storage:/app/storage'
-      # Mount custom files from host (prepare them first with prepare_staging_files.sh)
-      # IMPORTANT: Replace /home/azureuser/chatwoot-staging-patches with your actual path
-      # Or set STAGING_PATCHES_DIR env var and Coolify will replace it
-      - /home/azureuser/chatwoot-staging-patches/app:/app/app:ro
-      - /home/azureuser/chatwoot-staging-patches/config:/app/config:ro
-      - /home/azureuser/chatwoot-staging-patches/enterprise:/app/enterprise:ro
-      - /home/azureuser/chatwoot-staging-patches/lib:/app/lib:ro
+      # Mount only specific custom files (not entire directories to avoid overwriting image files)
+      # IMPORTANT: Replace /home/azureuser with your actual user path
+      - /home/azureuser/chatwoot-staging-patches/app/javascript/dashboard/helper/automationHelper.js:/app/app/javascript/dashboard/helper/automationHelper.js:ro
+      - /home/azureuser/chatwoot-staging-patches/app/javascript/dashboard/routes/dashboard/settings/automation/operators.js:/app/app/javascript/dashboard/routes/dashboard/settings/automation/operators.js:ro
+      - /home/azureuser/chatwoot-staging-patches/app/services/filter_service.rb:/app/app/services/filter_service.rb:ro
+      - /home/azureuser/chatwoot-staging-patches/config/app.yml:/app/config/app.yml:ro
+      - /home/azureuser/chatwoot-staging-patches/enterprise/app/services/llm/legacy_base_open_ai_service.rb:/app/enterprise/app/services/llm/legacy_base_open_ai_service.rb:ro
+      - /home/azureuser/chatwoot-staging-patches/enterprise/app/services/captain/llm/pdf_processing_service.rb:/app/enterprise/app/services/captain/llm/pdf_processing_service.rb:ro
+      # Mount integrations directory (needs to be a directory mount)
+      - /home/azureuser/chatwoot-staging-patches/lib/integrations:/app/lib/integrations:ro
     depends_on:
       - postgres
       - redis
@@ -67,11 +70,12 @@ services:
     pull_policy: always
     volumes:
       - 'storage:/app/storage'
-      # Mount custom files from host (same as rails)
-      - /home/azureuser/chatwoot-staging-patches/app:/app/app:ro
-      - /home/azureuser/chatwoot-staging-patches/config:/app/config:ro
-      - /home/azureuser/chatwoot-staging-patches/enterprise:/app/enterprise:ro
-      - /home/azureuser/chatwoot-staging-patches/lib:/app/lib:ro
+      # Mount only specific custom files (same as rails)
+      - /home/azureuser/chatwoot-staging-patches/app/services/filter_service.rb:/app/app/services/filter_service.rb:ro
+      - /home/azureuser/chatwoot-staging-patches/config/app.yml:/app/config/app.yml:ro
+      - /home/azureuser/chatwoot-staging-patches/enterprise/app/services/llm/legacy_base_open_ai_service.rb:/app/enterprise/app/services/llm/legacy_base_open_ai_service.rb:ro
+      - /home/azureuser/chatwoot-staging-patches/enterprise/app/services/captain/llm/pdf_processing_service.rb:/app/enterprise/app/services/captain/llm/pdf_processing_service.rb:ro
+      - /home/azureuser/chatwoot-staging-patches/lib/integrations:/app/lib/integrations:ro
     depends_on:
       - postgres
       - redis

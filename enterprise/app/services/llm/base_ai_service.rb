@@ -83,6 +83,7 @@ class Llm::BaseAiService
   # Wrapper class to make Azure HTTParty calls compatible with RubyLLM's interface
   class AzureChatWrapper
     require 'httparty'
+    require 'ostruct'
 
     attr_reader :messages
 
@@ -139,7 +140,9 @@ class Llm::BaseAiService
     end
 
     def add_message(role:, content:)
-      @messages << { role: role.to_s, content: content.to_s }
+      # Create a message-like object that responds to .role and .content
+      message_obj = OpenStruct.new(role: role.to_sym, content: content.to_s)
+      @messages << message_obj
       self
     end
 
@@ -149,7 +152,7 @@ class Llm::BaseAiService
       # Build messages: system instructions + existing messages + new user message
       api_messages = []
       api_messages << { role: 'system', content: @instructions } if @instructions.present?
-      api_messages += @messages.map { |m| { role: m[:role], content: m[:content] } }
+      api_messages += @messages.map { |m| { role: m.role.to_s, content: m.content.to_s } }
       api_messages << { role: 'user', content: message }
       
       parameters = {

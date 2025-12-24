@@ -61,6 +61,49 @@ class Whatsapp::FacebookApiClient
   end
 
   def subscribe_waba_webhook(waba_id, callback_url, verify_token)
+    # Meta requires a two-step process:
+    # 1. First subscribe the app (without override_callback_uri)
+    # 2. Then update the callback URI
+    subscribe_app_to_waba(waba_id)
+    update_webhook_callback_uri(waba_id, callback_url, verify_token)
+  end
+
+  def subscribe_app_to_waba(waba_id)
+    response = HTTParty.post(
+      "#{BASE_URI}/#{@api_version}/#{waba_id}/subscribed_apps",
+      headers: request_headers,
+      body: {}.to_json
+    )
+
+    # Check if response indicates success or already subscribed
+    if response.success?
+      Rails.logger.info("[WHATSAPP] App subscribed to WABA #{waba_id}")
+      return response.parsed_response
+    end
+
+    # Handle specific error cases
+    error_body = response.body.to_s
+    parsed_error = begin
+      JSON.parse(error_body)
+    rescue JSON::ParserError
+      {}
+    end
+
+    error_message = parsed_error.dig('error', 'message') || error_body
+
+    # If already subscribed or other non-critical errors, log and continue
+    if error_message.include?('already subscribed') ||
+       error_message.include?('already exists') ||
+       error_message.include?('duplicate')
+      Rails.logger.info("[WHATSAPP] App already subscribed to WABA #{waba_id}")
+      return
+    end
+
+    # For other errors, raise
+    raise "App subscription to WABA failed: #{error_body}"
+  end
+
+  def update_webhook_callback_uri(waba_id, callback_url, verify_token)
     response = HTTParty.post(
       "#{BASE_URI}/#{@api_version}/#{waba_id}/subscribed_apps",
       headers: request_headers,
@@ -70,7 +113,7 @@ class Whatsapp::FacebookApiClient
       }.to_json
     )
 
-    handle_response(response, 'Webhook subscription failed')
+    handle_response(response, 'Webhook callback URI update failed')
   end
 
   def unsubscribe_waba_webhook(waba_id)

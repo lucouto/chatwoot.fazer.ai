@@ -64,8 +64,16 @@ class Whatsapp::FacebookApiClient
     # Meta requires a two-step process:
     # 1. First subscribe the app (without override_callback_uri)
     # 2. Then update the callback URI
+    # Meta needs a moment to process the subscription before we can update the callback URI
     subscribe_app_to_waba(waba_id)
-    update_webhook_callback_uri(waba_id, callback_url, verify_token)
+    
+    # Wait a moment for Meta to process the subscription
+    sleep(2)
+    
+    # Retry updating callback URI with exponential backoff
+    retry_with_backoff(max_retries: 3) do
+      update_webhook_callback_uri(waba_id, callback_url, verify_token)
+    end
   end
 
   def subscribe_app_to_waba(waba_id)
@@ -144,5 +152,22 @@ class Whatsapp::FacebookApiClient
     raise "#{error_message}: #{response.body}" unless response.success?
 
     response.parsed_response
+  end
+
+  def retry_with_backoff(max_retries: 3, base_delay: 1)
+    retries = 0
+    begin
+      yield
+    rescue StandardError => e
+      retries += 1
+      if retries <= max_retries && e.message.include?('must be subscribed')
+        delay = base_delay * (2 ** (retries - 1))
+        Rails.logger.info("[WHATSAPP] Retrying callback URI update after #{delay}s (attempt #{retries}/#{max_retries})")
+        sleep(delay)
+        retry
+      else
+        raise
+      end
+    end
   end
 end

@@ -147,7 +147,9 @@ class Channel::Whatsapp < ApplicationRecord
   delegate :api_headers, to: :provider_service
 
   def setup_webhooks
-    perform_webhook_setup
+    # Run webhook setup in background to avoid request timeouts
+    # This allows Meta API retries to complete without blocking the HTTP request
+    perform_webhook_setup_async
   rescue StandardError => e
     Rails.logger.error "[WHATSAPP] Webhook setup failed: #{e.message}"
     prompt_reauthorization!
@@ -161,6 +163,15 @@ class Channel::Whatsapp < ApplicationRecord
 
   def validate_provider_config
     errors.add(:provider_config, 'Invalid Credentials') unless provider_service.validate_provider_config?
+  end
+
+  def perform_webhook_setup_async
+    business_account_id = provider_config['business_account_id']
+    api_key = provider_config['api_key']
+
+    # Run in background job to avoid request timeout
+    Whatsapp::WebhookSetupJob.perform_later(id, business_account_id, api_key)
+    Rails.logger.info("[WHATSAPP] Webhook setup queued for background processing (channel #{id})")
   end
 
   def perform_webhook_setup

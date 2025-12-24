@@ -64,14 +64,17 @@ class Whatsapp::FacebookApiClient
     # Meta requires a two-step process:
     # 1. First subscribe the app (without override_callback_uri)
     # 2. Then update the callback URI
-    # Meta needs a moment to process the subscription before we can update the callback URI
+    # Meta needs time to process the subscription before we can update the callback URI
     subscribe_app_to_waba(waba_id)
     
-    # Wait a moment for Meta to process the subscription
-    sleep(2)
+    # Wait for Meta to process the subscription
+    # Using 3 seconds as a balance between giving Meta time and avoiding excessive delays
+    Rails.logger.info("[WHATSAPP] Waiting 3 seconds for Meta to process subscription...")
+    sleep(3)
     
     # Retry updating callback URI with exponential backoff
-    retry_with_backoff(max_retries: 3) do
+    # Now running in background job, so we can afford more retries
+    retry_with_backoff(max_retries: 5, base_delay: 2) do
       update_webhook_callback_uri(waba_id, callback_url, verify_token)
     end
   end
@@ -160,12 +163,20 @@ class Whatsapp::FacebookApiClient
       yield
     rescue StandardError => e
       retries += 1
-      if retries <= max_retries && e.message.include?('must be subscribed')
+      # Check for subscription-related errors (more flexible matching)
+      error_message = e.message.to_s.downcase
+      is_subscription_error = error_message.include?('must be subscribed') ||
+                              error_message.include?('not be subscribed') ||
+                              error_message.include?('code 100') ||
+                              (error_message.include?('oauth') && error_message.include?('100'))
+      
+      if retries <= max_retries && is_subscription_error
         delay = base_delay * (2 ** (retries - 1))
         Rails.logger.info("[WHATSAPP] Retrying callback URI update after #{delay}s (attempt #{retries}/#{max_retries})")
         sleep(delay)
         retry
       else
+        Rails.logger.error("[WHATSAPP] Callback URI update failed after #{retries} attempts: #{e.message}")
         raise
       end
     end

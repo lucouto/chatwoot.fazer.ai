@@ -9,63 +9,15 @@ class Captain::Llm::PdfProcessingService < Llm::LegacyBaseOpenAiService
   def process
     return if document.openai_file_id.present?
 
-    # For Azure, extract text from PDF instead of uploading to OpenAI
-    if @is_azure
-      extract_pdf_text
-    else
-      file_id = upload_pdf_to_openai
-      raise CustomExceptions::PdfUploadError, I18n.t('captain.documents.pdf_upload_failed') if file_id.blank?
-      document.store_openai_file_id(file_id)
-    end
+    file_id = upload_pdf_to_openai
+    raise CustomExceptions::PdfUploadError, I18n.t('captain.documents.pdf_upload_failed') if file_id.blank?
+
+    document.store_openai_file_id(file_id)
   end
 
   private
 
   attr_reader :document
-
-  def extract_pdf_text
-    text = with_tempfile do |temp_file|
-      extract_text_from_pdf(temp_file.path)
-    end
-
-    # Store extracted text in document content (max 200,000 chars)
-    text = text[0..199_999] if text.length > 200_000
-    document.update!(content: text)
-    Rails.logger.info "Extracted #{text.length} characters from PDF document #{document.id}"
-  rescue StandardError => e
-    Rails.logger.error "Failed to extract PDF text: #{e.message}"
-    raise CustomExceptions::PdfUploadError, "Failed to extract PDF text: #{e.message}"
-  end
-
-  def extract_text_from_pdf(pdf_path)
-    # Try using pdf-reader gem first
-    if defined?(PDF::Reader)
-      extract_with_pdf_reader(pdf_path)
-    # Fallback to pdftotext system command if available
-    elsif system('which pdftotext > /dev/null 2>&1')
-      extract_with_pdftotext(pdf_path)
-    # Last resort: try using pdf-reader via require
-    else
-      begin
-        require 'pdf/reader'
-        extract_with_pdf_reader(pdf_path)
-      rescue LoadError
-        raise CustomExceptions::PdfUploadError, 'PDF text extraction requires pdf-reader gem or pdftotext command'
-      end
-    end
-  end
-
-  def extract_with_pdf_reader(pdf_path)
-    PDF::Reader.open(pdf_path) do |reader|
-      reader.pages.map(&:text).join("\n\n")
-    end
-  end
-
-  def extract_with_pdftotext(pdf_path)
-    output = `pdftotext "#{pdf_path}" - 2>&1`
-    raise "pdftotext failed: #{output}" unless $CHILD_STATUS.success?
-    output
-  end
 
   def upload_pdf_to_openai
     with_tempfile do |temp_file|

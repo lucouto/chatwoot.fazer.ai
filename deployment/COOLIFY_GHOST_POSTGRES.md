@@ -50,37 +50,53 @@ Le vrai Postgres = celui qui a le volume + un conteneur en cours. Le fantôme = 
 - **Restart** du stack (ne fait que redémarrer les conteneurs, ne relit pas le compose).
 - **Edit Compose File → Save → Redeploy** (testé : le fantôme persiste).
 
-## Ce qu'il faut faire
+## ✅ Solution simple (officielle) — supprimer le service fantôme dans l'UI
 
-**Rien d'urgent — c'est cosmétique.** Règles de survie :
+Confirmé par un mainteneur Coolify (issue
+[#9591](https://github.com/coollabsio/coolify/issues/9591), commentaire de Cinzya) :
 
-1. **Ne jugez PAS la santé via le badge Coolify** pour ce stack. Utilisez plutôt :
-   - `docker ps` sur l'hôte, ou
-   - la page **Super Admin → Instance Status** dans Chatwoot.
-2. **Ne supprimez JAMAIS** un conteneur ou un volume Postgres pour « nettoyer » le
-   badge — vous risqueriez d'effacer la base de production.
+> « This is not really a bug, Coolify just doesn't clean those up automatically.
+> Users have to enter the service settings and manually delete it. »
 
-## Correction définitive — AVANCÉ, déconseillé pour un simple badge
+Coolify crée un enregistrement `ServiceDatabase`/`ServiceApplication` par service du
+compose mais **ne supprime jamais** ceux dont le nom disparaît du compose. Il faut donc
+supprimer l'entrée fantôme à la main, **dans l'UI** (ciblé, sans toucher aux volumes).
 
-⚠️ **Piège important sur les volumes.** Coolify nomme les volumes
-`<ID-service>_<nom>`. Recréer le service génère un **nouvel ID** → donc de
-**nouveaux noms de volumes** (`<nouvelID>_postgres`). Le nouveau Postgres ne
-réutilisera **PAS** automatiquement `f8kkkgcsko4sogs88k8c80ok_postgres` : il
-démarrerait sur une **base vide**. « Les volumes survivent » est vrai sur le disque,
-mais le nouveau service ne s'y rattache pas tout seul.
+**Procédure (testée le 2026-06-17, a fonctionné) :**
 
-Si on y tient vraiment (sauvegarde §5 du runbook **obligatoire** d'abord) :
+1. Repérer le fantôme dans la liste **Services** : c'est le Postgres qui a **seulement
+   « Settings »** (pas de **« Backups »**). Coolify ne propose « Backups » que pour une
+   vraie base avec stockage ; le fantôme n'en a pas (« No storage found »).
+2. Cliquer **Settings** sur ce Postgres et **vérifier** qu'il indique bien
+   **« No storage found »** (aucun volume). Si au contraire il montre le volume
+   `f8kkkgcsko4sogs88k8c80ok_postgres` → STOP, c'est le vrai, le fantôme est l'autre.
+3. **Delete** ce service. Si une case « delete volumes » apparaît, **ne pas la cocher**
+   (le fantôme n'a pas de volume de toute façon).
+4. Rafraîchir l'UI → la carte disparaît et le stack repasse en **Running (healthy)**.
 
-- **Option A — chirurgie sur la base interne de Coolify** : supprimer la ligne de
-  service orpheline dans la base de Coolify. Spécifique à la version, risqué.
-- **Option B — supprimer/recréer le service** : il faut soit **restaurer le dump**
-  dans le nouveau Postgres, soit **épingler explicitement** le volume externe
-  existant (`f8kkkgcsko4sogs88k8c80ok_postgres`) dans le compose recréé.
+> Comme le fantôme n'a ni volume ni conteneur, sa suppression **n'efface aucune donnée**.
 
-**Recommandation : ne rien faire.** Le badge est cosmétique ; le coût et le risque
-d'une « correction » dépassent largement le bénéfice. Surveiller la santé via
-`docker ps` / Instance Status.
+Un correctif automatique est en cours côté Coolify
+([PR #9840](https://github.com/coollabsio/coolify/issues/9591) — « clean up orphaned
+service records on compose re-parse »).
+
+## À NE PAS faire
+
+- **Ne pas** supprimer un **conteneur** ou un **volume** Postgres en ligne de commande
+  pour « nettoyer » le badge — risque d'effacer la base de production.
+- **Ne pas** utiliser le contournement SQL de l'issue
+  (`DELETE FROM service_applications WHERE name='postgres'`) : ici les **deux** entrées
+  s'appellent `postgres`, ça supprimerait les deux. La suppression via l'UI est ciblée.
+- **Ne pas** recréer le service Coolify juste pour ça : il obtiendrait un **nouvel ID**
+  → de **nouveaux noms de volumes** → le Postgres démarrerait **vide** (il ne se
+  rattache pas tout seul à `f8kkkgcsko4sogs88k8c80ok_postgres`).
+
+## En attendant / en général
+
+- **Ne jugez pas la santé via le badge Coolify** ; utilisez `docker ps` sur l'hôte ou
+  **Super Admin → Instance Status** dans Chatwoot.
 
 ## Référence
 
-Détails et commandes de diagnostic dans `deployment/UPGRADE_RUNBOOK.md` (§7).
+- Issue Coolify : https://github.com/coollabsio/coolify/issues/9591
+- Détails et commandes de diagnostic : `deployment/UPGRADE_RUNBOOK.md` (§7).

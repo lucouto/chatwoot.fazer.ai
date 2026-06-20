@@ -160,8 +160,14 @@ The prod stack shows **two Postgres rows and a "Degraded" badge**. This is **cos
 - The 2nd row is an orphaned Coolify metadata record from the old 4.10 stack — **no
   container, no volume behind it**. Restart and Edit-Compose→Save→Redeploy do NOT clear it.
 - **Judge health by `docker ps` / Instance Status, never the badge.**
-- Definitive fix (optional, needs a window): delete + recreate the Coolify *service* from
-  the compose file — named volumes survive. Not worth it just for a badge.
+- **Simple official fix** (Coolify issue #9591, confirmed by a maintainer): the phantom
+  is an orphaned `ServiceDatabase` record Coolify never prunes. Open its **Settings** in
+  the UI (it's the Postgres row with only "Settings", no "Backups" → "No storage found"),
+  verify it has no volume/container, then **Delete** that single service. The stack goes
+  back to healthy and no data is touched (the phantom has no volume). Full procedure in
+  `deployment/COOLIFY_GHOST_POSTGRES.md`.
+- ⚠️ Do NOT recreate the whole Coolify service to fix this — new service = new ID = new
+  volume names → a fresh Postgres would start **empty**.
 
 **NEVER `docker volume rm` or `docker rm` a postgres container to "fix" the badge.**
 

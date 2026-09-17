@@ -4,6 +4,272 @@ require 'rails_helper'
 require Rails.root.join 'spec/models/concerns/reauthorizable_shared.rb'
 
 RSpec.describe Channel::Whatsapp do
+  describe '#serializable_hash' do
+    it 'does not expose the business management token' do
+      channel = build(:channel_whatsapp, business_management_token: 'business-token')
+
+      expect(channel.serializable_hash).not_to have_key('business_management_token')
+    end
+  end
+
+  describe '#template_access_token' do
+    let(:channel) do
+      build(
+        :channel_whatsapp,
+        provider: 'whatsapp_cloud',
+        provider_config: { 'api_key' => 'api-key', 'source' => source },
+        business_management_token: business_management_token
+      )
+    end
+    let(:source) { 'embedded_signup' }
+
+    context 'when running on Chatwoot Cloud' do
+      before { allow(ChatwootApp).to receive(:chatwoot_cloud?).and_return(true) }
+
+      context 'with a business management token' do
+        let(:business_management_token) { 'business-token' }
+
+        it 'uses the business management token' do
+          expect(channel.template_access_token).to eq('business-token')
+        end
+      end
+
+      context 'without a business management token' do
+        let(:business_management_token) { nil }
+
+        it 'uses the provider API key' do
+          expect(channel.template_access_token).to eq('api-key')
+        end
+      end
+
+      context 'with a manually configured inbox' do
+        let(:business_management_token) { 'business-token' }
+        let(:source) { nil }
+
+        it 'ignores the business management token' do
+          expect(channel.template_access_token).to eq('api-key')
+        end
+      end
+    end
+
+    context 'when running outside Chatwoot Cloud' do
+      before { allow(ChatwootApp).to receive(:chatwoot_cloud?).and_return(false) }
+
+      let(:business_management_token) { 'business-token' }
+
+      it 'ignores the business management token' do
+        expect(channel.template_access_token).to eq('api-key')
+      end
+    end
+  end
+
+  # The incident behind these: a coexistence number whose WABA sits in the customer's own
+  # Business Manager answers the phone-level override with `(#200) Permissions error`, because
+  # the integrator's system user cannot manage a WABA in another portfolio. Under a shared
+  # rescue that refusal marked the channel for reauthorization, and `Webhooks::WhatsappEventsJob`
+  # then discarded every inbound webhook for it: the number was dead for hours while Meta kept
+  # delivering, nine webhooks in and no conversations out.
+  describe '#setup_webhooks' do
+    let(:waba_id) { 'waba_568' }
+    let(:phone_number_id) { 'phone_568' }
+    # Written after create, not through the factory: its `whatsapp_cloud` branch merges its own
+    # ids over whatever the caller passed, so a phone number id given here would be silently
+    # replaced by the WABA's and the two calls would be indistinguishable in the stubs.
+    let(:channel) do
+      create(:channel_whatsapp, provider: 'whatsapp_cloud', sync_templates: false, validate_provider_config: false).tap do |created|
+        created.provider_config = { 'api_key' => 'test_key', 'phone_number_id' => phone_number_id,
+                                    'business_account_id' => waba_id, 'source' => 'embedded_signup',
+                                    'webhook_verify_token' => 'verify_token' }
+        created.save!(validate: false)
+      end
+    end
+
+    before do
+      stub_request(:get, %r{graph\.facebook\.com/.*/#{phone_number_id}})
+        .to_return(status: 200, body: { code_verification_status: 'VERIFIED', platform_type: 'CLOUD_API' }.to_json,
+                   headers: { 'Content-Type' => 'application/json' })
+      stub_request(:post, %r{graph\.facebook\.com/.*/#{waba_id}/subscribed_apps})
+        .to_return(status: 200, body: { success: true }.to_json, headers: { 'Content-Type' => 'application/json' })
+      # Read while the reauthorization notice is built, so only the failing branch reaches it.
+      stub_request(:get, %r{graph\.facebook\.com/.*/#{waba_id}\?})
+        .to_return(status: 200, body: { id: waba_id, name: 'WABA' }.to_json, headers: { 'Content-Type' => 'application/json' })
+    end
+
+    context 'when only the phone-level callback override fails' do
+      before do
+        stub_request(:post, %r{graph\.facebook\.com/.*/#{phone_number_id}\z})
+          .to_return(status: 403, body: { error: { message: '(#200) Permissions error', code: 200 } }.to_json,
+                     headers: { 'Content-Type' => 'application/json' })
+      end
+
+      it 'keeps the channel authorized, because the WABA subscription is what makes Meta deliver' do
+        channel.setup_webhooks
+
+        expect(channel.reauthorization_required?).to be(false)
+      end
+    end
+
+    # The same refusal reaches this code as a 403 carrying Meta's code 200, as a plain 500, and
+    # as a connection that closes with nothing to read. A fix that keys on the status or on the
+    # message covers the first and leaves the other two marking the channel.
+    context 'when the override fails with no response at all' do
+      before do
+        stub_request(:post, %r{graph\.facebook\.com/.*/#{phone_number_id}\z}).to_raise(Errno::ECONNRESET)
+      end
+
+      it 'keeps the channel authorized' do
+        channel.setup_webhooks
+
+        expect(channel.reauthorization_required?).to be(false)
+      end
+    end
+
+    context 'when Meta answers that the credentials are the problem' do
+      before do
+        stub_request(:post, %r{graph\.facebook\.com/.*/#{waba_id}/subscribed_apps})
+          .to_return(status: 401,
+                     body: { error: { message: 'Error validating access token', type: 'OAuthException', code: 190 } }.to_json,
+                     headers: { 'Content-Type' => 'application/json' })
+      end
+
+      it 'marks the channel for reauthorization' do
+        channel.setup_webhooks
+
+        expect(channel.reauthorization_required?).to be(true)
+      end
+
+      it 'tells the operator, because a revoked token only gets fixed by hand' do
+        admin_mailer = double
+        mailer_double = double
+        allow(AdministratorNotifications::ChannelNotificationsMailer).to receive(:with).and_return(admin_mailer)
+        allow(admin_mailer).to receive(:whatsapp_disconnect).and_return(mailer_double)
+        allow(mailer_double).to receive(:deliver_later)
+
+        channel.setup_webhooks
+
+        expect(admin_mailer).to have_received(:whatsapp_disconnect).with(channel.inbox)
+      end
+    end
+
+    # A ceiling that stops the wait says nothing about the credentials, and `prompt_reauthorization!`
+    # is not a log line: it writes the marker, runs the handler that emails the operator, invalidates
+    # the inbox cache and fires the event, and `Webhooks::WhatsappEventsJob` discards every inbound
+    # webhook while the marker stands. So the alarm has to come from an answer, never from silence.
+    context 'when the WABA subscription never answers' do
+      before do
+        stub_request(:post, %r{graph\.facebook\.com/.*/#{waba_id}/subscribed_apps}).to_timeout
+      end
+
+      it 'leaves the channel authorized' do
+        channel.setup_webhooks
+
+        expect(channel.reauthorization_required?).to be(false)
+      end
+
+      it 'does not email the operator about a disconnection that was never established' do
+        expect(AdministratorNotifications::ChannelNotificationsMailer).not_to receive(:with)
+
+        channel.setup_webhooks
+      end
+    end
+
+    context 'when the WABA subscription answers with a server error' do
+      before do
+        stub_request(:post, %r{graph\.facebook\.com/.*/#{waba_id}/subscribed_apps})
+          .to_return(status: 500, body: { error: { message: 'Internal error', code: 1 } }.to_json,
+                     headers: { 'Content-Type' => 'application/json' })
+      end
+
+      it 'leaves the channel authorized, because a bad minute at Meta is not a bad credential' do
+        channel.setup_webhooks
+
+        expect(channel.reauthorization_required?).to be(false)
+      end
+    end
+
+    # The refusal a coexistence number gets every time its WABA sits in the customer's own Business
+    # Manager. The optional half already survives it; the required half used to mark the channel.
+    context 'when Meta refuses the WABA subscription with a permissions error' do
+      before do
+        stub_request(:post, %r{graph\.facebook\.com/.*/#{waba_id}/subscribed_apps})
+          .to_return(status: 403, body: { error: { message: '(#200) Permissions error', code: 200 } }.to_json,
+                     headers: { 'Content-Type' => 'application/json' })
+      end
+
+      it 'leaves the channel authorized' do
+        channel.setup_webhooks
+
+        expect(channel.reauthorization_required?).to be(false)
+      end
+    end
+
+    # `cause` is only set by raising inside a rescue, which is what the setup service does when it
+    # re-raises with a prefix. Built here rather than provoked, because provoking it would mean
+    # stubbing the Graph client instance the service builds for itself.
+    def wrapped(inner)
+      raise inner
+    rescue StandardError => e
+      begin
+        raise "Webhook setup failed: #{e.message}"
+      rescue StandardError => wrapper
+        wrapper
+      end
+    end
+
+    context 'when something inside the Graph call path raises ArgumentError' do
+      it 'leaves the channel authorized, because that one is not about a credential' do
+        allow(channel).to receive(:perform_webhook_setup).and_raise(wrapped(ArgumentError.new('bad callback url')))
+
+        channel.setup_webhooks
+
+        expect(channel.reauthorization_required?).to be(false)
+      end
+    end
+
+    # The line is the only place a diagnosis starts from, and the two ways in are not the same fact:
+    # one of them never reached Meta at all. Saying Meta refused there would be the same trade this
+    # change exists to stop, one layer down.
+    describe 'the line that says why reauthorization was asked for' do
+      it 'says Meta answered, when Meta answered' do
+        stub_request(:post, %r{graph\.facebook\.com/.*/#{waba_id}/subscribed_apps})
+          .to_return(status: 401, body: { error: { message: 'Error validating access token', code: 190 } }.to_json,
+                     headers: { 'Content-Type' => 'application/json' })
+        allow(Rails.logger).to receive(:error)
+
+        channel.setup_webhooks
+
+        expect(Rails.logger).to have_received(:error)
+          .with("[WHATSAPP] Asking for reauthorization on channel #{channel.id}: " \
+                'Meta answered that the credentials are the problem')
+      end
+
+      it 'says the setup could not run, when nothing ever left' do
+        channel.provider_config = channel.provider_config.merge('api_key' => '')
+        channel.save!(validate: false)
+        allow(Rails.logger).to receive(:error)
+
+        channel.setup_webhooks
+
+        expect(Rails.logger).to have_received(:error)
+          .with("[WHATSAPP] Asking for reauthorization on channel #{channel.id}: " \
+                'the setup could not run without a credential')
+      end
+    end
+
+    context 'when the setup cannot run because there is no access token' do
+      before do
+        channel.provider_config = channel.provider_config.merge('api_key' => '')
+        channel.save!(validate: false)
+      end
+
+      it 'marks the channel for reauthorization, because a missing credential is not silence' do
+        channel.setup_webhooks
+
+        expect(channel.reauthorization_required?).to be(true)
+      end
+    end
+  end
+
   describe 'concerns' do
     let(:channel) { create(:channel_whatsapp) }
 
@@ -42,7 +308,20 @@ RSpec.describe Channel::Whatsapp do
                    body: { data: [{
                      id: '123456789', name: 'test_template'
                    }] }.to_json)
+      stub_request(:get, 'https://graph.facebook.com/v14.0//phone_numbers?fields=id&limit=100&access_token=test_key')
+        .to_return(status: 200, body: { data: [{ id: 'random_id' }] }.to_json, headers: { 'Content-Type' => 'application/json' })
+      stub_request(:get, 'https://graph.facebook.com/v14.0//message_templates')
+        .with(headers: { 'Authorization' => 'Bearer test_key' })
+        .to_return(status: 200, body: { data: [] }.to_json, headers: { 'Content-Type' => 'application/json' })
       expect(channel.save).to be(true)
+    end
+
+    it 'validates false when phone number id is wrong' do
+      stub_request(:get, 'https://graph.facebook.com/v14.0//message_templates?access_token=test_key')
+        .to_return(status: 200, body: { data: [] }.to_json)
+      stub_request(:get, 'https://graph.facebook.com/v14.0//phone_numbers?fields=id&limit=100&access_token=test_key')
+        .to_return(status: 200, body: { data: [{ id: 'another_phone_id' }] }.to_json, headers: { 'Content-Type' => 'application/json' })
+      expect(channel.save).to be(false)
     end
   end
 
@@ -274,7 +553,7 @@ RSpec.describe Channel::Whatsapp do
       create(:channel_whatsapp, provider: 'baileys', provider_config: { mark_as_read: true }, validate_provider_config: false, sync_templates: false)
     end
     let(:conversation) { create(:conversation) }
-    let(:message) { create(:message, conversation: conversation) }
+    let(:message) { create(:message, conversation: conversation, source_id: '3EB0READ0001') }
 
     it 'calls provider service method' do
       provider_double = instance_double(Whatsapp::Providers::WhatsappBaileysService, read_messages: nil)
@@ -299,6 +578,53 @@ RSpec.describe Channel::Whatsapp do
       channel.read_messages([message], conversation: conversation)
 
       expect(provider_double).to have_received(:read_messages)
+    end
+
+    # The provider echoes this receipt back as an inbound one, and the marker is what stops
+    # the inbound handlers from reading it as a device of this account opening the chat.
+    it 'marks the messages so the provider echo is not read back as a device read' do
+      provider_double = instance_double(Whatsapp::Providers::WhatsappBaileysService, read_messages: nil)
+      allow(Whatsapp::Providers::WhatsappBaileysService).to receive(:new).and_return(provider_double)
+
+      channel.read_messages([message], conversation: conversation)
+
+      expect(Whatsapp::SelfReadReceipts.acknowledged(conversation, [message.source_id])).to include(message.source_id)
+      Redis::Alfred.delete(Whatsapp::SelfReadReceipts.key(conversation, message.source_id))
+    end
+
+    # The echo is a multi-device artifact, so a business-API inbox has no device to hear it
+    # from and no inbound handler that reads the marker. Writing one per message there is a
+    # Redis key per message of a backlog that nothing ever looks at.
+    it 'leaves no marker for a provider that is not a paired phone' do
+      channel.update!(provider: 'whatsapp_cloud',
+                      provider_config: { mark_as_read: true, api_key: 'k', phone_number_id: '1', business_account_id: '2' })
+      provider_double = instance_double(Whatsapp::Providers::WhatsappCloudService, read_messages: nil)
+      allow(Whatsapp::Providers::WhatsappCloudService).to receive(:new).and_return(provider_double)
+
+      channel.read_messages([message], conversation: conversation)
+
+      expect(Whatsapp::SelfReadReceipts.acknowledged(conversation, [message.source_id])).to be_empty
+    end
+
+    # Z-API is a paired phone, so the echo does reach it, but its status callback only moves a
+    # message's status and never `agent_last_seen_at`. Nothing reads the marker back, so every
+    # key written for it expires unread.
+    it 'leaves no marker for a paired phone whose inbound path never reads it' do
+      channel.update!(provider: 'zapi', provider_config: { mark_as_read: true, api_key: 'k', instance_id: '1', token: 't' })
+      provider_double = instance_double(Whatsapp::Providers::WhatsappZapiService, read_messages: nil)
+      allow(Whatsapp::Providers::WhatsappZapiService).to receive(:new).and_return(provider_double)
+
+      channel.read_messages([message], conversation: conversation)
+
+      expect(Whatsapp::SelfReadReceipts.acknowledged(conversation, [message.source_id])).to be_empty
+    end
+
+    it 'leaves no marker when the inbox has mark_as_read off' do
+      channel.update!(provider_config: { mark_as_read: false })
+
+      channel.read_messages([message], conversation: conversation)
+
+      expect(Whatsapp::SelfReadReceipts.acknowledged(conversation, [message.source_id])).to be_empty
     end
 
     it 'does not call method if provider service does not implement it' do
@@ -492,6 +818,11 @@ RSpec.describe Channel::Whatsapp do
         before do
           stub_request(:delete, "https://graph.facebook.com/v22.0/#{channel.provider_config['business_account_id']}/subscribed_apps")
             .to_return(status: 200, body: '', headers: {})
+          stub_request(:post, "https://graph.facebook.com/v22.0/#{channel.provider_config['phone_number_id']}")
+            .with(body: { webhook_configuration: { override_callback_uri: '' } }.to_json)
+            .to_return(status: 200, body: '', headers: {})
+          stub_request(:post, "https://graph.facebook.com/v22.0/#{channel.provider_config['phone_number_id']}/deregister")
+            .to_return(status: 200, body: '', headers: {})
         end
 
         it 'does not invoke callback' do
@@ -551,6 +882,105 @@ RSpec.describe Channel::Whatsapp do
     end
   end
 
+  describe '#update_reachout_time_lock!' do
+    let(:channel) do
+      create(:channel_whatsapp, provider: 'baileys', validate_provider_config: false, sync_templates: false,
+                                provider_connection: { 'connection' => 'open', 'epoch' => 7 })
+    end
+
+    it 'merges the lock without touching connection or epoch' do
+      channel.update_reachout_time_lock!({ is_active: true, time_enforcement_ends: '2026-06-19T21:52:39.000Z' })
+
+      expect(channel.reload.provider_connection).to eq(
+        'connection' => 'open',
+        'epoch' => 7,
+        'reachout_time_lock' => { 'is_active' => true, 'time_enforcement_ends' => '2026-06-19T21:52:39.000Z' }
+      )
+    end
+
+    it 'broadcasts the updated provider_connection' do
+      sync_dispatcher = Rails.configuration.dispatcher.sync_dispatcher
+      expect(sync_dispatcher).to receive(:dispatch).with(
+        Events::Types::INBOX_PROVIDER_CONNECTION_UPDATED,
+        anything,
+        hash_including(inbox: channel.inbox)
+      )
+
+      channel.update_reachout_time_lock!({ is_active: true })
+    end
+
+    it 'is a no-op when the lock is unchanged' do
+      channel.update_reachout_time_lock!({ is_active: true })
+
+      sync_dispatcher = Rails.configuration.dispatcher.sync_dispatcher
+      expect(sync_dispatcher).not_to receive(:dispatch)
+
+      channel.update_reachout_time_lock!({ is_active: true })
+    end
+
+    it 'returns without raising or broadcasting when passed nil (404/fetch error)' do
+      expect(channel.provider_connection).to be_present # realize the record before arming the dispatch guard
+
+      sync_dispatcher = Rails.configuration.dispatcher.sync_dispatcher
+      expect(sync_dispatcher).not_to receive(:dispatch)
+
+      expect { channel.update_reachout_time_lock!(nil) }.not_to raise_error
+    end
+  end
+
+  describe '#update_new_chat_cap!' do
+    let(:channel) do
+      create(:channel_whatsapp, provider: 'baileys', validate_provider_config: false, sync_templates: false,
+                                provider_connection: { 'connection' => 'open', 'epoch' => 7 })
+    end
+
+    it 'persists only the UI-relevant keys, dropping server_sent_timestamp' do
+      channel.update_new_chat_cap!({
+                                     capping_status: 'CAPPED',
+                                     ote_status: 'ELIGIBLE',
+                                     mv_status: 'NOT_ELIGIBLE',
+                                     total_quota: 100,
+                                     used_quota: 100,
+                                     cycle_start_timestamp: '1781640000',
+                                     cycle_end_timestamp: '1781699999',
+                                     server_sent_timestamp: '1781645846'
+                                   })
+
+      expect(channel.reload.provider_connection).to eq(
+        'connection' => 'open',
+        'epoch' => 7,
+        'new_chat_cap' => {
+          'capping_status' => 'CAPPED',
+          'ote_status' => 'ELIGIBLE',
+          'mv_status' => 'NOT_ELIGIBLE',
+          'total_quota' => 100,
+          'used_quota' => 100,
+          'cycle_start_timestamp' => '1781640000',
+          'cycle_end_timestamp' => '1781699999'
+        }
+      )
+    end
+
+    it 'is a no-op when the cap is unchanged' do
+      cap = { capping_status: 'FIRST_WARNING', total_quota: 100, used_quota: 50 }
+      channel.update_new_chat_cap!(cap)
+
+      sync_dispatcher = Rails.configuration.dispatcher.sync_dispatcher
+      expect(sync_dispatcher).not_to receive(:dispatch)
+
+      channel.update_new_chat_cap!(cap)
+    end
+
+    it 'returns without raising or broadcasting when passed nil (404/fetch error)' do
+      expect(channel.provider_connection).to be_present # realize the record before arming the dispatch guard
+
+      sync_dispatcher = Rails.configuration.dispatcher.sync_dispatcher
+      expect(sync_dispatcher).not_to receive(:dispatch)
+
+      expect { channel.update_new_chat_cap!(nil) }.not_to raise_error
+    end
+  end
+
   describe '#provider_connection_data' do
     let(:channel) do
       create(:channel_whatsapp, provider: 'baileys', validate_provider_config: false, sync_templates: false,
@@ -596,6 +1026,75 @@ RSpec.describe Channel::Whatsapp do
         expect(data).to eq({ connection: 'open' })
       end
     end
+
+    context 'when a reach-out time-lock is present' do
+      let(:channel) do
+        create(:channel_whatsapp, provider: 'baileys', validate_provider_config: false, sync_templates: false,
+                                  provider_connection: {
+                                    'connection' => 'open',
+                                    'reachout_time_lock' => { 'is_active' => true, 'time_enforcement_ends' => '2026-06-19T21:52:39.000Z' }
+                                  })
+      end
+
+      it 'exposes the lock to non-administrators (agents see the banner too)' do
+        account_user = create(:account_user, account: channel.account, role: :agent)
+        allow(Current).to receive(:account_user).and_return(account_user)
+
+        data = channel.provider_connection_data
+
+        expect(data).to eq({
+                             connection: 'open',
+                             reachout_time_lock: { 'is_active' => true, 'time_enforcement_ends' => '2026-06-19T21:52:39.000Z' }
+                           })
+      end
+    end
+
+    context 'when a send stall is present' do
+      let(:channel) do
+        create(:channel_whatsapp, provider: 'baileys', validate_provider_config: false, sync_templates: false,
+                                  provider_connection: {
+                                    'connection' => 'open',
+                                    'send_stall' => { 'consecutive_timeouts' => 3, 'action' => 'suppressed' }
+                                  })
+      end
+
+      # The agent is the one whose replies are silently going nowhere, and the connection
+      # still reads 'open', so without this there is nothing in their view to warn them.
+      # Nothing in the payload is credential-sensitive, unlike the QR.
+      it 'exposes the stall to non-administrators' do
+        account_user = create(:account_user, account: channel.account, role: :agent)
+        allow(Current).to receive(:account_user).and_return(account_user)
+
+        data = channel.provider_connection_data
+
+        expect(data).to eq({
+                             connection: 'open',
+                             send_stall: { 'consecutive_timeouts' => 3, 'action' => 'suppressed' }
+                           })
+      end
+    end
+
+    context 'when a new-chat cap is present' do
+      let(:channel) do
+        create(:channel_whatsapp, provider: 'baileys', validate_provider_config: false, sync_templates: false,
+                                  provider_connection: {
+                                    'connection' => 'open',
+                                    'new_chat_cap' => { 'capping_status' => 'CAPPED', 'total_quota' => 100, 'used_quota' => 100 }
+                                  })
+      end
+
+      it 'exposes the cap to non-administrators' do
+        account_user = create(:account_user, account: channel.account, role: :agent)
+        allow(Current).to receive(:account_user).and_return(account_user)
+
+        data = channel.provider_connection_data
+
+        expect(data).to eq({
+                             connection: 'open',
+                             new_chat_cap: { 'capping_status' => 'CAPPED', 'total_quota' => 100, 'used_quota' => 100 }
+                           })
+      end
+    end
   end
 
   describe '#convert_provider!' do
@@ -617,6 +1116,11 @@ RSpec.describe Channel::Whatsapp do
       stub_request(:get, %r{graph\.facebook\.com/v\d+\.\d+/.*message_templates})
         .to_return(status: 200, body: { data: [] }.to_json, headers: { 'Content-Type' => 'application/json' })
       stub_request(:delete, %r{graph\.facebook\.com/v\d+\.\d+/.*/subscribed_apps})
+        .to_return(status: 200, body: { success: true }.to_json, headers: { 'Content-Type' => 'application/json' })
+      stub_request(:post, %r{graph\.facebook\.com/v\d+\.\d+/\d+\z})
+        .with(body: { webhook_configuration: { override_callback_uri: '' } }.to_json)
+        .to_return(status: 200, body: { success: true }.to_json, headers: { 'Content-Type' => 'application/json' })
+      stub_request(:post, %r{graph\.facebook\.com/v\d+\.\d+/\d+/deregister})
         .to_return(status: 200, body: { success: true }.to_json, headers: { 'Content-Type' => 'application/json' })
       webhook_setup_service = instance_double(Whatsapp::WebhookSetupService, perform: nil)
       allow(Whatsapp::WebhookSetupService).to receive(:new).and_return(webhook_setup_service)
@@ -918,6 +1422,24 @@ RSpec.describe Channel::Whatsapp do
       channel.update!(provider_config: channel.provider_config.merge('source' => 'embedded_signup', 'calling_enabled' => true))
 
       expect(channel.voice_enabled?).to be false
+    end
+  end
+
+  describe '#inbound_calls_enabled?' do
+    let(:account) { create(:account) }
+
+    it 'returns true by default when nothing has been toggled' do
+      channel = create(:channel_whatsapp, account: account, provider: 'whatsapp_cloud',
+                                          validate_provider_config: false, sync_templates: false)
+      expect(channel.inbound_calls_enabled?).to be true
+    end
+
+    it 'returns false only when explicitly disabled in provider_config' do
+      channel = create(:channel_whatsapp, account: account, provider: 'whatsapp_cloud',
+                                          validate_provider_config: false, sync_templates: false)
+      channel.update!(provider_config: channel.provider_config.merge('inbound_calls_enabled' => false))
+
+      expect(channel.inbound_calls_enabled?).to be false
     end
   end
 end

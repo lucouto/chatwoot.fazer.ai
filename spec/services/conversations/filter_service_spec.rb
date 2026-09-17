@@ -231,6 +231,24 @@ describe Conversations::FilterService do
         expect(result[:count][:all_count]).to be 2
       end
 
+      it 'filters conversations by display_id substring' do
+        conversation = create(:conversation, account: account, inbox: inbox, assignee: user_1)
+        create(:conversation, account: account, inbox: inbox, assignee: user_1)
+
+        params[:payload] = [{
+          attribute_key: 'display_id',
+          filter_operator: 'contains',
+          values: [conversation.display_id.to_s],
+          query_operator: nil,
+          custom_attribute_type: ''
+        }.with_indifferent_access]
+
+        result = filter_service.new(params, user_1, account).perform
+
+        expect(result[:count][:all_count]).to eq(1)
+        expect(result[:conversations].pluck(:id)).to contain_exactly(conversation.id)
+      end
+
       it 'filters items with does not contain filter operator with values being an array' do
         params[:payload] = [{
           attribute_key: 'browser_language',
@@ -288,6 +306,30 @@ describe Conversations::FilterService do
         expect(result[:count][:all_count]).to be 1
       end
 
+      it 'applies the planner hint to permission scoping only for selective label filters' do
+        hinted_sql = lambda do |payload|
+          params[:payload] = payload.map(&:with_indifferent_access)
+          filter_service.new(params, user_1, account).perform[:conversations].to_sql
+        end
+
+        expect(hinted_sql.call([{ attribute_key: 'labels', filter_operator: 'equal_to', values: ['support'], query_operator: nil }]))
+          .to include('conversations.inbox_id + 0')
+
+        # no labels condition
+        expect(hinted_sql.call([{ attribute_key: 'status', filter_operator: 'equal_to', values: ['open'], query_operator: nil }]))
+          .not_to include('inbox_id + 0')
+
+        # negative label operator does not narrow the result set
+        expect(hinted_sql.call([{ attribute_key: 'labels', filter_operator: 'not_equal_to', values: ['support'], query_operator: nil }]))
+          .not_to include('inbox_id + 0')
+
+        # OR payloads leave the result broad even with an equal_to label condition
+        expect(hinted_sql.call([
+                                 { attribute_key: 'status', filter_operator: 'equal_to', values: ['open'], query_operator: 'OR' },
+                                 { attribute_key: 'labels', filter_operator: 'equal_to', values: ['support'], query_operator: nil }
+                               ])).not_to include('inbox_id + 0')
+      end
+
       it 'filter conversations by is_present filter_operator' do
         params[:payload] = [
           {
@@ -314,6 +356,47 @@ describe Conversations::FilterService do
         expect(result[:conversations].pluck(:campaign_id).sort).to eq [campaign_2.id, campaign_1.id].sort
       end
 
+      it 'treats AgentBot-owned conversations as having an assignee' do
+        account.conversations.destroy_all
+        agent_bot = create(:agent_bot, account: account)
+        bot_owned_conversation = create(:conversation, account: account, inbox: inbox, assignee_agent_bot: agent_bot)
+        human_owned_conversation = create(:conversation, account: account, inbox: inbox, assignee: user_1)
+        create(:conversation, account: account, inbox: inbox)
+
+        params[:payload] = [{
+          attribute_key: 'assignee_id',
+          filter_operator: 'is_present',
+          values: [],
+          query_operator: nil,
+          custom_attribute_type: ''
+        }.with_indifferent_access]
+
+        result = filter_service.new(params, user_1, account).perform
+
+        expect(result[:conversations].pluck(:id)).to contain_exactly(bot_owned_conversation.id, human_owned_conversation.id)
+        expect(result[:count]).to include(assigned_count: 2, unassigned_count: 0, all_count: 2)
+      end
+
+      it 'excludes AgentBot-owned conversations from assignee is not present' do
+        account.conversations.destroy_all
+        agent_bot = create(:agent_bot, account: account)
+        create(:conversation, account: account, inbox: inbox, assignee_agent_bot: agent_bot)
+        unassigned_conversation = create(:conversation, account: account, inbox: inbox)
+
+        params[:payload] = [{
+          attribute_key: 'assignee_id',
+          filter_operator: 'is_not_present',
+          values: [],
+          query_operator: nil,
+          custom_attribute_type: ''
+        }.with_indifferent_access]
+
+        result = filter_service.new(params, user_1, account).perform
+
+        expect(result[:conversations].pluck(:id)).to contain_exactly(unassigned_conversation.id)
+        expect(result[:count]).to include(assigned_count: 0, unassigned_count: 1, all_count: 1)
+      end
+
       it 'handles invalid query conditions' do
         params[:payload] = [
           {
@@ -337,12 +420,144 @@ describe Conversations::FilterService do
 
         expect { filter_service.new(params, user_1, account).perform }.to raise_error(CustomExceptions::CustomFilter::InvalidQueryOperator)
       end
+
+      it 'rejects a query operator on the final condition' do
+        params[:payload] = [
+          {
+            attribute_key: 'status',
+            filter_operator: 'equal_to',
+            values: ['open'],
+            query_operator: 'AND',
+            custom_attribute_type: ''
+          }.with_indifferent_access
+        ]
+
+        expect { filter_service.new(params, user_1, account).perform }.to raise_error(CustomExceptions::CustomFilter::InvalidQueryOperator)
+      end
+    end
+  end
+
+  describe '#perform with sort_by' do
+    let!(:params) { { payload: [], page: 1 } }
+
+    before do
+      # Activity ascending with creation, so newest-created is also newest-active. Both
+      # orders are then unambiguous and each one is the exact reverse of the other.
+      account.conversations.order(:created_at).each_with_index do |conversation, index|
+        conversation.update_columns(last_activity_at: (100 - index).minutes.ago) # rubocop:disable Rails/SkipsModelValidations
+      end
+    end
+
+    it 'defaults to newest activity first, as before' do
+      result = filter_service.new(params, user_1, account).perform
+
+      expect(result[:conversations].pluck(:id)).to eq(
+        account.conversations.order(last_activity_at: :desc).pluck(:id)
+      )
+    end
+
+    it 'honours last_activity_at_asc, which the folder view could not ask for' do
+      result = filter_service.new(params.merge(sort_by: 'last_activity_at_asc'), user_1, account).perform
+
+      expect(result[:conversations].pluck(:id)).to eq(
+        account.conversations.order(last_activity_at: :asc).pluck(:id)
+      )
+    end
+
+    it 'honours created_at_asc' do
+      result = filter_service.new(params.merge(sort_by: 'created_at_asc'), user_1, account).perform
+
+      expect(result[:conversations].pluck(:id)).to eq(account.conversations.order(created_at: :asc).pluck(:id))
+    end
+
+    # The params reaching this service are `permit!`ed straight off the request, so an
+    # unknown value must not become a method name.
+    it 'falls back to the default instead of calling an arbitrary method' do
+      result = filter_service.new(params.merge(sort_by: 'destroy_all'), user_1, account).perform
+
+      expect(result[:conversations].pluck(:id)).to eq(
+        account.conversations.order(last_activity_at: :desc).pluck(:id)
+      )
+      expect(account.conversations.count).to be_positive
+    end
+
+    it 'keeps a pinned conversation first in every order' do
+      pinned = account.conversations.order(:last_activity_at).first
+      create(:conversation_pin, conversation: pinned, user: user_1, account: account)
+
+      result = filter_service.new(params.merge(sort_by: 'last_activity_at_desc'), user_1, account).perform
+
+      expect(result[:conversations].first.id).to eq(pinned.id)
+    end
+  end
+
+  describe '#perform with pinned conversations' do
+    let!(:params) { { payload: [], page: 1 } }
+    let(:pinned_conversation) { user_2_assigned_conversation }
+
+    before do
+      # Oldest conversation gets the oldest activity, so without a pin it always sorts last.
+      conversations = account.conversations.order(:created_at).to_a
+      conversations.each_with_index do |conversation, index|
+        conversation.update_columns(last_activity_at: (conversations.length - index).minutes.ago) # rubocop:disable Rails/SkipsModelValidations
+      end
+      create(:conversation_pin, conversation: pinned_conversation, user: user_1, account: account)
+    end
+
+    it 'puts the pinned conversation first for the agent who pinned it' do
+      result = filter_service.new(params, user_1, account).perform
+
+      expect(result[:conversations].first.id).to eq(pinned_conversation.id)
+    end
+
+    it 'keeps the default order for every other agent' do
+      result = filter_service.new(params, user_2, account).perform
+
+      expect(result[:conversations].last.id).to eq(pinned_conversation.id)
+    end
+
+    it 'does not change the conversation counts' do
+      counts_with_pin = filter_service.new(params, user_1, account).perform[:count]
+      ConversationPin.destroy_all
+
+      expect(filter_service.new(params, user_1, account).perform[:count]).to eq(counts_with_pin)
+    end
+
+    it 'still applies the filters' do
+      params[:payload] = [{ attribute_key: 'status', filter_operator: 'not_equal_to', values: %w[open],
+                            query_operator: nil, custom_attribute_type: '' }.with_indifferent_access]
+
+      result = filter_service.new(params, user_1, account).perform
+
+      expect(result[:conversations].map(&:id)).not_to include(pinned_conversation.id)
     end
   end
 
   describe '#perform on custom attribute' do
     context 'with query present' do
       let!(:params) { { payload: [], page: 1 } }
+
+      it 'filters custom date attributes by days before' do
+        en_conversation_1.update!(
+          custom_attributes: en_conversation_1.custom_attributes.merge('conversation_created' => (Time.zone.today - 4.days).to_s)
+        )
+        en_conversation_2.update!(
+          custom_attributes: en_conversation_2.custom_attributes.merge('conversation_created' => (Time.zone.today - 2.days).to_s)
+        )
+        params[:payload] = [
+          {
+            attribute_key: 'conversation_created',
+            filter_operator: 'days_before',
+            values: [3],
+            query_operator: nil
+          }.with_indifferent_access
+        ]
+
+        result = filter_service.new(params, user_1, account).perform
+
+        expect(result[:conversations].pluck(:id)).to include(en_conversation_1.id)
+        expect(result[:conversations].pluck(:id)).not_to include(en_conversation_2.id)
+      end
 
       it 'filter by custom_attributes and labels' do
         user_2_assigned_conversation.update_labels('support')
@@ -467,6 +682,62 @@ describe Conversations::FilterService do
         result = filter_service.new(params, user_1, account).perform
         expect(result[:conversations].length).to be 1
       end
+
+      it 'filters conversations where the custom attribute is present' do
+        params[:payload] = [
+          {
+            attribute_key: 'conversation_type',
+            filter_operator: 'is_present',
+            values: [],
+            query_operator: nil,
+            custom_attribute_type: ''
+          }.with_indifferent_access
+        ]
+
+        result = filter_service.new(params, user_1, account).perform
+
+        expect(result[:conversations].pluck(:id)).to contain_exactly(en_conversation_2.id, user_2_assigned_conversation.id)
+      end
+
+      it 'filters conversations where the custom attribute is not present' do
+        params[:payload] = [
+          {
+            attribute_key: 'conversation_type',
+            filter_operator: 'is_not_present',
+            values: [],
+            query_operator: nil,
+            custom_attribute_type: ''
+          }.with_indifferent_access
+        ]
+
+        result = filter_service.new(params, user_1, account).perform
+
+        conversation_ids = result[:conversations].pluck(:id)
+        expect(conversation_ids).to include(en_conversation_1.id)
+        expect(conversation_ids).not_to include(en_conversation_2.id, user_2_assigned_conversation.id)
+      end
+
+      it 'filters conversations where the custom attribute is not present combined with another condition' do
+        params[:payload] = [
+          {
+            attribute_key: 'conversation_type',
+            filter_operator: 'is_not_present',
+            values: [],
+            query_operator: 'AND',
+            custom_attribute_type: ''
+          }.with_indifferent_access,
+          {
+            attribute_key: 'status',
+            filter_operator: 'equal_to',
+            values: ['pending'],
+            query_operator: nil
+          }.with_indifferent_access
+        ]
+
+        result = filter_service.new(params, user_1, account).perform
+
+        expect(result[:conversations].pluck(:id)).to contain_exactly(en_conversation_1.id)
+      end
     end
   end
 
@@ -586,13 +857,64 @@ describe Conversations::FilterService do
             {
               attribute_key: 'last_activity_at',
               filter_operator: 'days_before',
-              values: [3],
+              values: [2],
               query_operator: nil,
               custom_attribute_type: ''
             }.with_indifferent_access
           ]
 
           expected_count = account.conversations.where('last_activity_at < ?', (Time.zone.today - 2.days)).count
+
+          result = filter_service.new(params, user_1, account).perform
+          expect(result[:conversations].length).to eq expected_count
+        end
+
+        it 'parses string days_before values as base 10' do
+          params[:payload] = [
+            {
+              attribute_key: 'last_activity_at',
+              filter_operator: 'days_before',
+              values: ['02'],
+              query_operator: nil,
+              custom_attribute_type: ''
+            }.with_indifferent_access
+          ]
+
+          expected_count = account.conversations.where('last_activity_at < ?', (Time.zone.today - 2.days)).count
+
+          result = filter_service.new(params, user_1, account).perform
+          expect(result[:conversations].length).to eq expected_count
+        end
+
+        it 'raises InvalidValue for negative and non-numeric days_before values' do
+          [-1, 'abc', 0, 999].each do |invalid_value|
+            params[:payload] = [
+              {
+                attribute_key: 'last_activity_at',
+                filter_operator: 'days_before',
+                values: [invalid_value],
+                query_operator: nil,
+                custom_attribute_type: ''
+              }.with_indifferent_access
+            ]
+
+            expect { filter_service.new(params, user_1, account).perform }
+              .to raise_error(CustomExceptions::CustomFilter::InvalidValue)
+          end
+        end
+
+        it 'filter by last_activity_at days_before when payload is ActionController::Parameters' do
+          params[:payload] = [
+            ActionController::Parameters.new(
+              attribute_key: 'last_activity_at',
+              filter_operator: 'days_before',
+              values: [3],
+              query_operator: nil,
+              custom_attribute_type: ''
+            ).permit!
+          ]
+
+          expected_count = account.conversations.where('last_activity_at < ?', (Time.zone.today - 3.days)).count
 
           result = filter_service.new(params, user_1, account).perform
           expect(result[:conversations].length).to eq expected_count
@@ -625,6 +947,80 @@ describe Conversations::FilterService do
         expect(Current.account).to be_nil
         expect(result[:conversations].length).to eq expected_count
       end
+    end
+  end
+
+  describe 'result counts' do
+    let!(:params) { { payload: [], page: 1 } }
+    let(:payload) do
+      [
+        {
+          attribute_key: 'status',
+          filter_operator: 'not_equal_to',
+          values: %w[resolved],
+          query_operator: nil,
+          custom_attribute_type: ''
+        }.with_indifferent_access
+      ]
+    end
+
+    before do
+      create(:conversation, account: account, inbox: inbox)
+    end
+
+    it 'returns mine, assigned, unassigned and all counts for the filtered set' do
+      params[:payload] = payload
+      result = filter_service.new(params, user_1, account).perform
+
+      expect(result[:count]).to eq(
+        mine_count: 3,
+        assigned_count: 4,
+        unassigned_count: 1,
+        all_count: 5
+      )
+    end
+
+    it 'counts conversations owned by an agent bot as assigned' do
+      create(:conversation, account: account, inbox: inbox, assignee_agent_bot: create(:agent_bot, account: account))
+      params[:payload] = payload
+
+      result = filter_service.new(params, user_1, account).perform
+
+      expect(result[:count]).to eq(
+        mine_count: 3,
+        assigned_count: 5,
+        unassigned_count: 1,
+        all_count: 6
+      )
+    end
+
+    it 'returns zero counts when the permission scope resolves to no conversations' do
+      params[:payload] = payload
+      permission_filter = instance_double(Conversations::PermissionFilterService, perform: Conversation.none)
+      allow(Conversations::PermissionFilterService).to receive(:new).and_return(permission_filter)
+
+      result = filter_service.new(params, user_1, account).perform
+
+      expect(result[:count]).to eq(
+        mine_count: 0,
+        assigned_count: 0,
+        unassigned_count: 0,
+        all_count: 0
+      )
+    end
+
+    it 'computes all counts in a single query' do
+      params[:payload] = payload
+
+      count_queries = []
+      subscriber = ActiveSupport::Notifications.subscribe('sql.active_record') do |_name, _started, _finished, _unique_id, event|
+        count_queries << event[:sql] if event[:sql].match?(/COUNT\(/i) && !event[:cached]
+      end
+
+      filter_service.new(params, user_1, account).perform
+      expect(count_queries.size).to eq(1)
+    ensure
+      ActiveSupport::Notifications.unsubscribe(subscriber) if subscriber
     end
   end
 

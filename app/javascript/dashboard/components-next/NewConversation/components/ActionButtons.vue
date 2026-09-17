@@ -3,6 +3,8 @@ import { defineAsyncComponent, ref, computed, watch, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useUISettings } from 'dashboard/composables/useUISettings';
 import { useFileUpload } from 'dashboard/composables/useFileUpload';
+import { useAlert } from 'dashboard/composables';
+import { usableFilesFromTransfer } from 'dashboard/helper/pastedFiles';
 import { vOnClickOutside } from '@vueuse/components';
 import { useEventListener } from '@vueuse/core';
 import { ALLOWED_FILE_TYPES } from 'shared/constants/messages';
@@ -15,8 +17,7 @@ import ContentTemplateSelector from './ContentTemplateSelector.vue';
 const props = defineProps({
   attachedFiles: { type: Array, default: () => [] },
   isWhatsappInbox: { type: Boolean, default: false },
-  isWhatsappBaileysInbox: { type: Boolean, default: false },
-  isWhatsappZapiInbox: { type: Boolean, default: false },
+  isWhatsappSessionInbox: { type: Boolean, default: false },
   isEmailOrWebWidgetInbox: { type: Boolean, default: false },
   isTwilioSmsInbox: { type: Boolean, default: false },
   isTwilioWhatsAppInbox: { type: Boolean, default: false },
@@ -55,8 +56,9 @@ const generateUid = () => {
 const uploadAttachment = ref(null);
 const isEmojiPickerOpen = ref(false);
 
-const EmojiInput = defineAsyncComponent(
-  () => import('shared/components/emoji/EmojiInput.vue')
+const EmojiIconPicker = defineAsyncComponent(
+  () =>
+    import('dashboard/components-next/emoji-icon-picker/EmojiIconPicker.vue')
 );
 
 const {
@@ -79,11 +81,17 @@ const shouldShowEmojiButton = computed(() => {
   );
 });
 
+// Attachments on conversation-create are supported for email/web widget and for the
+// WhatsApp session providers, which send free-form media. The template-based WhatsApp
+// flows (Cloud, Twilio) can't start with media.
+const shouldShowAttachButton = computed(() => {
+  return props.isEmailOrWebWidgetInbox || props.isWhatsappSessionInbox;
+});
+
 const isRegularMessageMode = computed(() => {
   return (
     (!props.isWhatsappInbox && !props.isTwilioWhatsAppInbox) ||
-    props.isWhatsappBaileysInbox ||
-    props.isWhatsappZapiInbox
+    props.isWhatsappSessionInbox
   );
 });
 
@@ -176,19 +184,24 @@ const keyboardEvents = {
 useKeyboardEvents(keyboardEvents);
 
 const onPaste = e => {
-  if (!props.isEmailOrWebWidgetInbox) return;
+  if (!shouldShowAttachButton.value) return;
 
   const files = e.clipboardData?.files;
   if (!files?.length) return;
 
-  // Filter valid files (non-zero size)
-  Array.from(files)
-    .filter(file => file.size > 0)
-    .forEach(file => {
-      const { name, type, size } = file;
-      // Add unique ID for clipboard-pasted files
-      onFileUpload({ file, name, type, size, id: generateUid() });
-    });
+  // Same rule as the reply composer: empty files are dropped, and the refusal is said out loud
+  // unless the clipboard also carried text, which is the shape of a rich copy bringing an
+  // invalid zero-byte attachment nobody chose.
+  const { files: usable, shouldAlertEmpty } = usableFilesFromTransfer(
+    e.clipboardData
+  );
+  if (shouldAlertEmpty) useAlert(t('CONVERSATION.FILE_IS_EMPTY'));
+
+  usable.forEach(file => {
+    const { name, type, size } = file;
+    // Add unique ID for clipboard-pasted files
+    onFileUpload({ file, name, type, size, id: generateUid() });
+  });
 };
 
 useEventListener(document, 'paste', onPaste);
@@ -221,14 +234,15 @@ useEventListener(document, 'paste', onPaste);
           class="!w-10"
           @click="isEmojiPickerOpen = !isEmojiPickerOpen"
         />
-        <EmojiInput
+        <EmojiIconPicker
           v-if="isEmojiPickerOpen"
+          mode="emoji"
           class="!top-auto !bottom-full mb-1.5 ltr:left-0 rtl:right-0"
-          :on-click="onClickInsertEmoji"
+          @select="onClickInsertEmoji($event.value)"
         />
       </div>
       <FileUpload
-        v-if="isEmailOrWebWidgetInbox"
+        v-if="shouldShowAttachButton"
         ref="uploadAttachment"
         input-id="composeNewConversationAttachment"
         :size="4096 * 4096"

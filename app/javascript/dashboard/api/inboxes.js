@@ -11,6 +11,20 @@ class Inboxes extends CacheEnabledApiClient {
     return 'inbox';
   }
 
+  // The inbox payload carries `capabilities`, which the build that served it decides, so a
+  // key fetched from a different request cannot vouch for these rows. The index sends the
+  // key for the body it just built; without one, this response came from a build that does
+  // not, and it is not cached at all.
+  // eslint-disable-next-line class-methods-use-this
+  get usesResponseBoundCacheKey() {
+    return true;
+  }
+
+  // eslint-disable-next-line class-methods-use-this
+  cacheKeyFromResponse(response) {
+    return response?.data?.cache_key ?? null;
+  }
+
   // Keeps the locally cached inbox fresh on connection-status changes without bumping
   // the cache key (so it never triggers a full refetch). Silent if IDB is unavailable.
   async updateCachedProviderConnection(id, providerConnection) {
@@ -44,8 +58,38 @@ class Inboxes extends CacheEnabledApiClient {
     });
   }
 
+  getAgentBotObservers(inboxId) {
+    return axios.get(`${this.url}/${inboxId}/agent_bot_observers`);
+  }
+
+  addAgentBotObserver(inboxId, botId) {
+    return axios.post(`${this.url}/${inboxId}/agent_bot_observers`, {
+      agent_bot: botId,
+    });
+  }
+
+  removeAgentBotObserver(inboxId, botId) {
+    return axios.delete(`${this.url}/${inboxId}/agent_bot_observers/${botId}`);
+  }
+
   syncTemplates(inboxId) {
     return axios.post(`${this.url}/${inboxId}/sync_templates`);
+  }
+
+  getMessageTemplates(inboxId, params = {}, config = {}) {
+    return axios.get(`${this.url}/${inboxId}/message_templates`, {
+      ...config,
+      params,
+    });
+  }
+
+  updateWhatsappBusinessManagementToken(inboxId, businessManagementToken) {
+    return axios.put(
+      `${this.url}/${inboxId}/whatsapp_business_management_token`,
+      {
+        business_management_token: businessManagementToken,
+      }
+    );
   }
 
   createCSATTemplate(inboxId, template) {
@@ -84,6 +128,10 @@ class Inboxes extends CacheEnabledApiClient {
     return axios.post(`${this.url}/${inboxId}/setup_channel_provider`);
   }
 
+  requestPairingCode(inboxId) {
+    return axios.post(`${this.url}/${inboxId}/request_pairing_code`);
+  }
+
   disconnectChannelProvider(inboxId) {
     return axios.post(`${this.url}/${inboxId}/disconnect_channel_provider`);
   }
@@ -101,6 +149,12 @@ class Inboxes extends CacheEnabledApiClient {
 
   disableWhatsappCalling(inboxId) {
     return axios.post(`${this.url}/${inboxId}/disable_whatsapp_calling`);
+  }
+
+  setInboundCalls(inboxId, enabled) {
+    return axios.post(`${this.url}/${inboxId}/set_inbound_calls`, {
+      inbound_calls_enabled: enabled,
+    });
   }
 }
 

@@ -47,6 +47,30 @@ RSpec.describe Macros::ExecutionService, type: :service do
         end
       end
     end
+
+    # A refused save leaves its attributes dirty on the record, and the next
+    # action would save them too. An inbox that prevents assignment takeover is
+    # one way to get here; any rejected save is another.
+    context 'when an action is refused mid-macro' do
+      let(:owner) { create(:user, account: account, role: :agent) }
+
+      before do
+        create(:inbox_member, user: owner, inbox: conversation.inbox)
+        conversation.update!(assignee: owner)
+        conversation.inbox.update!(prevent_assignment_takeover: true)
+        allow(macro).to receive(:actions).and_return([
+                                                       { action_name: 'assign_agent', action_params: ['self'] },
+                                                       { action_name: 'change_status', action_params: ['resolved'] }
+                                                     ])
+      end
+
+      it 'still runs the actions that follow it' do
+        service.perform
+
+        expect(conversation.reload.assignee).to eq(owner)
+        expect(conversation.reload.status).to eq('resolved')
+      end
+    end
   end
 
   describe '#assign_team' do
@@ -172,6 +196,17 @@ RSpec.describe Macros::ExecutionService, type: :service do
   describe '#send_webhook_event' do
     it 'sends a webhook event' do
       expect(WebhookJob).to receive(:perform_later)
+      service.send(:send_webhook_event, ['https://example.com/webhook'])
+    end
+
+    it 'includes the macro and the executing user in the payload' do
+      expect(WebhookJob).to receive(:perform_later) do |url, payload|
+        expect(url).to eq('https://example.com/webhook')
+        expect(payload[:event]).to eq('macro.executed')
+        expect(payload[:macro]).to eq({ id: macro.id, name: macro.name })
+        expect(payload[:executed_by]).to eq(user.webhook_data)
+      end
+
       service.send(:send_webhook_event, ['https://example.com/webhook'])
     end
   end

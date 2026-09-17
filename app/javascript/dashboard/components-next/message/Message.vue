@@ -4,6 +4,7 @@ import { useTimeoutFn } from '@vueuse/core';
 import { provideMessageContext } from './provider.js';
 import { useTrack } from 'dashboard/composables';
 import { useMapGetter } from 'dashboard/composables/store';
+import { useAccount } from 'dashboard/composables/useAccount';
 import { emitter } from 'shared/helpers/mitt';
 import { useI18n } from 'vue-i18n';
 import { useRoute, useRouter } from 'vue-router';
@@ -11,6 +12,10 @@ import { LocalStorage } from 'shared/helpers/localStorage';
 import { ACCOUNT_EVENTS } from 'dashboard/helper/AnalyticsHelper/events';
 import { LOCAL_STORAGE_KEYS } from 'dashboard/constants/localStorage';
 import { getInboxIconByType } from 'dashboard/helper/inbox';
+import {
+  canDeleteMessages,
+  getUserRole,
+} from 'dashboard/helper/permissionsHelper.js';
 import { BUS_EVENTS } from 'shared/constants/busEvents';
 import {
   MESSAGE_TYPES,
@@ -42,6 +47,7 @@ import LocationBubble from './bubbles/Location.vue';
 import CSATBubble from './bubbles/CSAT.vue';
 import FormBubble from './bubbles/Form.vue';
 import VoiceCallBubble from './bubbles/VoiceCall.vue';
+import WhatsappFlowResponseBubble from './bubbles/WhatsappFlowResponse.vue';
 
 import MessageError from './MessageError.vue';
 import ContextMenu from 'dashboard/modules/conversations/components/MessageContextMenu.vue';
@@ -159,7 +165,24 @@ const route = useRoute();
 const inboxGetter = useMapGetter('inboxes/getInbox');
 const inbox = computed(() => inboxGetter.value(props.inboxId) || {});
 const router = useRouter();
+const isOnChatwootCloud = useMapGetter('globalConfig/isOnChatwootCloud');
 const { replaceInstallationName } = useBranding();
+const { accountId: currentAccountId, currentAccount } = useAccount();
+const currentUser = useMapGetter('getCurrentUser');
+
+// Mirrors `MessagePolicy#destroy?`: hiding the option is a convenience, the
+// endpoint enforces the same rule.
+const canDeleteMessage = computed(() =>
+  canDeleteMessages({
+    userRole: getUserRole(currentUser.value, currentAccountId.value),
+    accountSettings: currentAccount.value?.settings || {},
+  })
+);
+
+const isCaptainMessage = computed(() => {
+  const senderType = props.sender?.type ?? props.senderType;
+  return senderType === SENDER_TYPES.CAPTAIN_ASSISTANT;
+});
 
 /**
  * Computes the message variant based on props
@@ -323,6 +346,10 @@ const componentToRender = computed(() => {
     if (emailInboxTypes.includes(props.messageType)) return EmailBubble;
   }
 
+  if (props.contentAttributes?.whatsappFlowResponse) {
+    return WhatsappFlowResponseBubble;
+  }
+
   if (props.contentType === CONTENT_TYPES.INPUT_CSAT) {
     return CSATBubble;
   }
@@ -398,6 +425,12 @@ const isMessageDeleted = computed(() => {
   return props.contentAttributes?.deleted;
 });
 
+const shouldShowWhatsappReferral = computed(
+  () =>
+    variant.value === MESSAGE_VARIANTS.USER &&
+    !!props.contentAttributes?.referral
+);
+
 const payloadForContextMenu = computed(() => {
   return {
     id: props.id,
@@ -420,6 +453,7 @@ const contextMenuEnabledOptions = computed(() => {
   return {
     copy: hasText,
     delete:
+      canDeleteMessage.value &&
       (hasText || hasAttachments || hasRichContent) &&
       !isFailedOrProcessing &&
       !isMessageDeleted.value,
@@ -435,6 +469,10 @@ const contextMenuEnabledOptions = computed(() => {
       !isFailedOrProcessing &&
       !isMessageDeleted.value &&
       props.inboxSupportsEdit,
+    report:
+      isOnChatwootCloud.value &&
+      isCaptainMessage.value &&
+      !isMessageDeleted.value,
   };
 });
 
@@ -505,6 +543,8 @@ const shouldRenderMessage = computed(() => {
   const isUnsupported = props.contentAttributes?.isUnsupported;
   const isAnIntegrationMessage =
     props.contentType === CONTENT_TYPES.INTEGRATIONS;
+  const hasWhatsappFlowResponse =
+    !!props.contentAttributes?.whatsappFlowResponse;
   const isFailedMessage = props.status === MESSAGE_STATUS.FAILED;
   const hasExternalError = !!props.contentAttributes?.externalError;
   const hasRichContent = !!props.contentAttributes?.rich;
@@ -515,6 +555,8 @@ const shouldRenderMessage = computed(() => {
     isEmailContentType ||
     isUnsupported ||
     isAnIntegrationMessage ||
+    hasWhatsappFlowResponse ||
+    shouldShowWhatsappReferral.value ||
     isFailedMessage ||
     hasExternalError ||
     hasRichContent
@@ -555,10 +597,11 @@ function handleReplyTo() {
 
 const avatarInfo = computed(() => {
   if (props.contentAttributes?.externalEcho) {
-    const { name, avatar_url, channel_type, medium } = inbox.value;
+    const { name, avatar_url, channel_type, medium, voice_enabled } =
+      inbox.value;
     const iconName = avatar_url
       ? null
-      : getInboxIconByType(channel_type, medium);
+      : getInboxIconByType(channel_type, medium, 'fill', voice_enabled);
     return {
       name: iconName ? '' : name || t('CONVERSATION.NATIVE_APP'),
       src: avatar_url || '',

@@ -70,7 +70,7 @@ class User < ApplicationRecord
 
   # TODO: remove in a future version once online status is moved to account users
   # remove the column availability from users
-  enum availability: { online: 0, offline: 1, busy: 2 }
+  enum :availability, { online: 0, offline: 1, busy: 2 }
 
   # The validation below has been commented out as it does not
   # work because :validatable in devise overrides this.
@@ -79,7 +79,7 @@ class User < ApplicationRecord
   validates :name, presence: true
   validates :email, presence: true
 
-  serialize :otp_backup_codes, type: Array
+  serialize :otp_backup_codes, coder: YAML, type: Array
 
   # Encrypt sensitive MFA fields
   encrypts :otp_secret, deterministic: true
@@ -90,11 +90,12 @@ class User < ApplicationRecord
   accepts_nested_attributes_for :account_users
 
   has_many :assigned_conversations, foreign_key: 'assignee_id', class_name: 'Conversation', dependent: :nullify, inverse_of: :assignee
-  alias_attribute :conversations, :assigned_conversations
+  alias conversations assigned_conversations
   has_many :csat_survey_responses, foreign_key: 'assigned_agent_id', dependent: :nullify, inverse_of: :assigned_agent
   has_many :reviewed_csat_survey_responses, foreign_key: 'review_notes_updated_by_id', class_name: 'CsatSurveyResponse',
                                             dependent: :nullify, inverse_of: :review_notes_updated_by
   has_many :conversation_participants, dependent: :destroy_async
+  has_many :conversation_pins, dependent: :destroy_async
   has_many :participating_conversations, through: :conversation_participants, source: :conversation
 
   has_many :inbox_members, dependent: :destroy_async
@@ -107,6 +108,7 @@ class User < ApplicationRecord
 
   has_many :scheduled_messages, as: :author, dependent: :nullify
   has_many :recurring_scheduled_messages, as: :author, dependent: :nullify
+  has_many :user_sessions, dependent: :destroy
 
   has_many :custom_filters, dependent: :destroy_async
   has_many :dashboard_apps, dependent: :nullify
@@ -125,6 +127,7 @@ class User < ApplicationRecord
 
   before_validation :set_password_and_uid, on: :create
   after_destroy :remove_macros
+  after_save :sync_user_sessions, if: :saved_change_to_tokens?
 
   scope :order_by_full_name, -> { order('lower(name) ASC') }
 
@@ -133,7 +136,11 @@ class User < ApplicationRecord
   end
 
   def send_devise_notification(notification, *)
-    account = Current.account || accounts.first
+    # accounts.first only means something when there is one of them. For a user in several
+    # workspaces it is whichever row the database returns, and that arbitrary pick decides both
+    # the language and the brand of a personal credential email -- an email change confirmed
+    # from the profile screen would go out dressed as a workspace the person did not act in.
+    account = Current.account || (accounts.one? ? accounts.first : nil)
     devise_mailer.with(account: account).send(notification, self, *).deliver_later
   end
 
@@ -236,6 +243,11 @@ class User < ApplicationRecord
   end
 
   private
+
+  def sync_user_sessions
+    active_client_ids = (tokens || {}).keys
+    user_sessions.where.not(client_id: active_client_ids).destroy_all
+  end
 
   def remove_macros
     macros.personal.destroy_all

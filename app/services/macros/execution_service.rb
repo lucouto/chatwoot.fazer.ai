@@ -13,6 +13,12 @@ class Macros::ExecutionService < ActionService
       begin
         send(action[:action_name], action[:action_params])
       rescue StandardError => e
+        # Drop whatever the failed action staged on the record. `update!` leaves
+        # its attributes dirty when the save is refused, and the next action
+        # would save them too and fail for a reason its own params never asked
+        # for. An inbox with `prevent_assignment_takeover` is one way to get
+        # here; any rejected save is another.
+        @conversation.reload
         ChatwootExceptionTracker.new(e, account: @account).capture_exception
       end
     end
@@ -64,7 +70,13 @@ class Macros::ExecutionService < ActionService
   end
 
   def send_webhook_event(webhook_url)
-    payload = @conversation.webhook_data.merge(event: 'macro.executed')
+    payload = @conversation.webhook_data.merge(
+      event: 'macro.executed',
+      macro: { id: @macro.id, name: @macro.name },
+      executed_by: @user&.webhook_data
+    )
     WebhookJob.perform_later(webhook_url.first, payload)
   end
 end
+
+Macros::ExecutionService.include_mod_with('Macros::ExecutionService')

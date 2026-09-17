@@ -1,19 +1,26 @@
 <script>
+import { mapGetters } from 'vuex';
 import { useAlert } from 'dashboard/composables';
+import { useWhatsappEmbeddedSignup } from 'dashboard/composables/useWhatsappEmbeddedSignup';
+import { FEATURE_FLAGS } from 'dashboard/featureFlags';
+import whatsappChannel from 'dashboard/api/channel/whatsappChannel';
 import inboxMixin from 'shared/mixins/inboxMixin';
 import SettingsSection from '../../../../../components/SettingsSection.vue';
 import SettingsFieldSection from 'dashboard/components-next/Settings/SettingsFieldSection.vue';
 import SettingsToggleSection from 'dashboard/components-next/Settings/SettingsToggleSection.vue';
 import SettingsAccordion from 'dashboard/components-next/Settings/SettingsAccordion.vue';
 import ImapSettings from '../ImapSettings.vue';
+import ConversationContinuitySettings from '../ConversationContinuitySettings.vue';
 import SmtpSettings from '../SmtpSettings.vue';
 import { useVuelidate } from '@vuelidate/core';
 import NextButton from 'dashboard/components-next/button/Button.vue';
 import TextArea from 'next/textarea/TextArea.vue';
-import WhatsappReauthorize from '../channels/whatsapp/Reauthorize.vue';
 import { sanitizeAllowedDomains, isValidURL } from 'dashboard/helper/URLHelper';
 import { requiredIf } from '@vuelidate/validators';
 import WhatsappLinkDeviceModal from '../components/WhatsappLinkDeviceModal.vue';
+import SessionProviderConfiguration from './SessionProviderConfiguration.vue';
+import WhatsappHistorySync from './WhatsappHistorySync.vue';
+import WhatsappBusinessManagementToken from './WhatsappBusinessManagementToken.vue';
 import InboxName from 'dashboard/components/widgets/InboxName.vue';
 import Switch from 'dashboard/components-next/switch/Switch.vue';
 
@@ -24,11 +31,14 @@ export default {
     SettingsToggleSection,
     SettingsAccordion,
     ImapSettings,
+    ConversationContinuitySettings,
     SmtpSettings,
     NextButton,
     TextArea,
-    WhatsappReauthorize,
     WhatsappLinkDeviceModal,
+    SessionProviderConfiguration,
+    WhatsappHistorySync,
+    WhatsappBusinessManagementToken,
     InboxName,
     // eslint-disable-next-line vue/no-reserved-component-names
     Switch,
@@ -41,14 +51,14 @@ export default {
     },
   },
   setup() {
-    return { v$: useVuelidate() };
+    const { runEmbeddedSignup } = useWhatsappEmbeddedSignup();
+    return { v$: useVuelidate(), runEmbeddedSignup };
   },
   data() {
     return {
       hmacMandatory: false,
       allowMobileWebview: false,
       whatsAppInboxAPIKey: '',
-      isRequestingReauthorization: false,
       isSyncingTemplates: false,
       allowedDomains: '',
       isUpdatingAllowedDomains: false,
@@ -63,14 +73,14 @@ export default {
       zapiInstanceIdUpdate: '',
       zapiTokenUpdate: '',
       zapiClientTokenUpdate: '',
+      isReconfiguring: false,
     };
   },
   validations() {
     return {
       whatsAppInboxAPIKey: {
-        requiredIf: requiredIf(
-          !this.isAWhatsAppBaileysChannel && !this.isAWhatsAppZapiChannel
-        ),
+        // A session provider pairs with a phone; there is no API key to ask for.
+        requiredIf: requiredIf(!this.isASessionWhatsAppChannel),
       },
       baileysProviderUrl: { isValidURL: value => !value || isValidURL(value) },
       zapiInstanceIdUpdate: {},
@@ -79,11 +89,24 @@ export default {
     };
   },
   computed: {
+    ...mapGetters({
+      accountId: 'getCurrentAccountId',
+      isFeatureEnabledonAccount: 'accounts/isFeatureEnabledonAccount',
+      isOnChatwootCloud: 'globalConfig/isOnChatwootCloud',
+    }),
     isEmbeddedSignupWhatsApp() {
       return this.inbox.provider_config?.source === 'embedded_signup';
     },
-    whatsappAppId() {
-      return window.chatwootConfig?.whatsappAppId;
+    showWhatsAppReconfigure() {
+      return (
+        this.isEmbeddedSignupWhatsApp &&
+        this.isFeatureEnabledonAccount(
+          this.accountId,
+          this.isOnChatwootCloud
+            ? FEATURE_FLAGS.WHATSAPP_EMBEDDED_SIGNUP_FLOW
+            : FEATURE_FLAGS.WHATSAPP_RECONFIGURE
+        )
+      );
     },
     isForwardingEnabled() {
       return !!this.inbox.forwarding_enabled;
@@ -202,9 +225,26 @@ export default {
         useAlert(this.$t('INBOX_MGMT.EDIT.API.ERROR_MESSAGE'));
       }
     },
-    async handleReconfigure() {
-      if (this.$refs.whatsappReauth) {
-        await this.$refs.whatsappReauth.requestAuthorization();
+    async reconfigureWhatsApp() {
+      this.isReconfiguring = true;
+      try {
+        const credentials = await this.runEmbeddedSignup();
+        // User dismissed the Meta popup without completing signup.
+        if (!credentials) return;
+
+        await whatsappChannel.postEmbeddedSignupAuthorization({
+          inboxId: this.inbox.id,
+          ...credentials,
+        });
+        useAlert(
+          this.$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_RECONFIGURE_SUCCESS')
+        );
+      } catch (error) {
+        useAlert(
+          this.$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_RECONFIGURE_ERROR')
+        );
+      } finally {
+        this.isReconfiguring = false;
       }
     },
     async syncTemplates() {
@@ -505,6 +545,7 @@ export default {
         </div>
       </SettingsFieldSection>
     </div>
+    <ConversationContinuitySettings :inbox="inbox" />
     <ImapSettings :inbox="inbox" />
     <SmtpSettings v-if="inbox.imap_enabled" :inbox="inbox" />
   </div>
@@ -513,22 +554,34 @@ export default {
       <!-- Embedded Signup Section -->
       <template v-if="isEmbeddedSignupWhatsApp">
         <SettingsFieldSection
-          v-if="whatsappAppId"
+          :label="$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_WEBHOOK_TITLE')"
+          :help-text="
+            $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_WEBHOOK_SUBHEADER')
+          "
+        >
+          <woot-code :script="inbox.provider_config.webhook_verify_token" />
+        </SettingsFieldSection>
+        <SettingsFieldSection
+          v-if="showWhatsAppReconfigure"
           :label="
             $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_EMBEDDED_SIGNUP_TITLE')
           "
-          :help-text="`${$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_EMBEDDED_SIGNUP_SUBHEADER')} ${$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_EMBEDDED_SIGNUP_DESCRIPTION')}`"
+          :help-text="
+            $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_EMBEDDED_SIGNUP_DESCRIPTION')
+          "
         >
-          <div class="flex flex-col gap-1 items-start">
-            <NextButton @click="handleReconfigure">
-              {{ $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_RECONFIGURE_BUTTON') }}
-            </NextButton>
-          </div>
+          <NextButton
+            :is-loading="isReconfiguring"
+            :disabled="isReconfiguring"
+            @click="reconfigureWhatsApp"
+          >
+            {{ $t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_RECONFIGURE_BUTTON') }}
+          </NextButton>
         </SettingsFieldSection>
       </template>
 
       <!-- Manual Setup Section -->
-      <template v-else>
+      <template v-else-if="!isEmbeddedSignupWhatsApp">
         <SettingsFieldSection
           :label="$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_WEBHOOK_TITLE')"
           :help-text="
@@ -575,6 +628,14 @@ export default {
           </div>
         </SettingsFieldSection>
       </template>
+      <WhatsappBusinessManagementToken
+        v-if="
+          isOnChatwootCloud &&
+          inbox.provider === 'whatsapp_cloud' &&
+          isEmbeddedSignupWhatsApp
+        "
+        :inbox="inbox"
+      />
       <SettingsFieldSection
         :label="$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_TEMPLATES_SYNC_TITLE')"
         :help-text="
@@ -586,13 +647,15 @@ export default {
         </NextButton>
       </SettingsFieldSection>
     </div>
-    <WhatsappReauthorize
-      v-if="isEmbeddedSignupWhatsApp"
-      ref="whatsappReauth"
-      :inbox="inbox"
-      class="hidden"
-    />
   </div>
+  <SessionProviderConfiguration
+    v-else-if="
+      isASessionWhatsAppChannel &&
+      !isAWhatsAppBaileysChannel &&
+      !isAWhatsAppZapiChannel
+    "
+    :inbox="inbox"
+  />
   <div v-else-if="isAWhatsAppBaileysChannel">
     <WhatsappLinkDeviceModal
       v-if="showLinkDeviceModal"
@@ -629,6 +692,7 @@ export default {
           </NextButton>
         </div>
       </SettingsSection>
+      <WhatsappHistorySync :inbox="inbox" />
       <SettingsSection
         :title="$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_PROVIDER_URL_TITLE')"
         :sub-title="

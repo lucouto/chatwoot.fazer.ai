@@ -38,7 +38,7 @@ module InstagramConcern
   end
 
   def fetch_instagram_user_details(access_token)
-    endpoint = 'https://graph.instagram.com/v22.0/me'
+    endpoint = "https://graph.instagram.com/#{GlobalConfigService.load('INSTAGRAM_API_VERSION', 'v22.0')}/me"
     params = {
       fields: 'id,username,user_id,name,profile_picture_url,account_type',
       access_token: access_token
@@ -51,7 +51,8 @@ module InstagramConcern
     response = HTTParty.get(
       endpoint,
       query: params,
-      headers: { 'Accept' => 'application/json' }
+      headers: { 'Accept' => 'application/json' },
+      **Instagram::RequestOptions::INSTAGRAM_SHORT_REQUEST_OPTIONS
     )
 
     unless response.success?

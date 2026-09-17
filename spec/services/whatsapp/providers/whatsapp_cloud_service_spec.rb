@@ -4,7 +4,16 @@ describe Whatsapp::Providers::WhatsappCloudService do
   subject(:service) { described_class.new(whatsapp_channel: whatsapp_channel) }
 
   let(:conversation) { create(:conversation, inbox: whatsapp_channel.inbox) }
-  let(:whatsapp_channel) { create(:channel_whatsapp, provider: 'whatsapp_cloud', validate_provider_config: false, sync_templates: false) }
+  let(:business_management_token) { nil }
+  let(:whatsapp_channel) do
+    create(
+      :channel_whatsapp,
+      provider: 'whatsapp_cloud',
+      business_management_token: business_management_token,
+      validate_provider_config: false,
+      sync_templates: false
+    )
+  end
 
   let(:message) do
     create(:message, conversation: conversation, message_type: :outgoing, content: 'test', inbox: whatsapp_channel.inbox, source_id: 'external_id')
@@ -146,9 +155,102 @@ describe Whatsapp::Providers::WhatsappCloudService do
           .with { |req| JSON.parse(req.body).dig('audio', 'voice') })
       end
 
-      it 'does not send voice flag for recorded audio in non-ogg format' do
-        attachment = message.attachments.new(account_id: message.account_id, file_type: :audio, meta: { 'is_recorded_audio' => true })
-        attachment.file.attach(io: Rails.root.join('spec/assets/sample.mp3').open, filename: 'sample.mp3', content_type: 'audio/mpeg')
+      # Measured against the live Graph API in #520: WhatsApp accepts the voice flag on every type
+      # its own rejection message lists, and a phone renders all of them as a voice bubble. Only
+      # opus carries a waveform. Refusing the rest turned a voice note into a file to tap, which
+      # protected against nothing. This example used to assert the opposite.
+      %w[sample.mp3 sample.m4a sample.aac].each do |fixture|
+        it "sends the voice flag for a recorded #{fixture.split('.').last} too" do
+          attachment = message.attachments.new(account_id: message.account_id, file_type: :audio,
+                                               meta: { 'is_recorded_audio' => true })
+          attachment.file.attach(io: Rails.root.join("spec/assets/#{fixture}").open, filename: fixture)
+
+          stub_request(:post, 'https://graph.facebook.com/v24.0/123456789/messages')
+            .with(
+              body: hash_including({
+                                     messaging_product: 'whatsapp',
+                                     to: '+123456789',
+                                     type: 'audio',
+                                     audio: WebMock::API.hash_including({ link: anything, voice: true })
+                                   })
+            )
+            .to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
+
+          expect(service.send_message('+123456789', message)).to eq 'message_id'
+        end
+      end
+
+      # The payload type comes from `file_type`, not from the content type, so an audio file stored
+      # as a plain file goes out as a document. `voice` is not a field a document payload has, and
+      # WhatsApp rejects the send if it is there.
+      it 'leaves the voice flag off when the attachment goes out as a document' do
+        attachment = message.attachments.new(account_id: message.account_id, file_type: :file,
+                                             meta: { 'is_voice_message' => true })
+        attachment.file.attach(io: Rails.root.join('spec/assets/sample.mp3').open, filename: 'sample.mp3')
+
+        stub_request(:post, 'https://graph.facebook.com/v24.0/123456789/messages')
+          .with(body: hash_including({ messaging_product: 'whatsapp', to: '+123456789', type: 'document' }))
+          .to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
+
+        expect(service.send_message('+123456789', message)).to eq 'message_id'
+        expect(WebMock).not_to(have_requested(:post, 'https://graph.facebook.com/v24.0/123456789/messages')
+          .with { |req| JSON.parse(req.body).dig('document', 'voice') })
+      end
+
+      # Chrome hands ActiveStorage `audio/ogg; codecs=opus` for a recording and the blob keeps the
+      # string verbatim, and a media type is case-insensitive by spec, so a client may shout it.
+      # Comparing the string whole would drop exactly the format the list exists for.
+      ['audio/ogg; codecs=opus', 'AUDIO/OGG', ' audio/ogg ; codecs=opus'].each do |stored|
+        it "reads the media type out of #{stored.inspect}" do
+          attachment = message.attachments.new(account_id: message.account_id, file_type: :audio,
+                                               meta: { 'is_recorded_audio' => true })
+          attachment.file.attach(io: Rails.root.join('spec/assets/sample_opus.ogg').open, filename: 'voice.ogg')
+          attachment.save!
+          attachment.file.blob.update_column(:content_type, stored) # rubocop:disable Rails/SkipsModelValidations
+          message.attachments.reload
+
+          stub_request(:post, 'https://graph.facebook.com/v24.0/123456789/messages')
+            .with(
+              body: hash_including({
+                                     messaging_product: 'whatsapp',
+                                     to: '+123456789',
+                                     type: 'audio',
+                                     audio: WebMock::API.hash_including({ link: anything, voice: true })
+                                   })
+            )
+            .to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
+
+          expect(service.send_message('+123456789', message)).to eq 'message_id'
+        end
+      end
+
+      # The end of the path the cast in `Messages::MessageBuilder` protects: a caller that writes
+      # `is_voice_message=false` through `attachments_metadata` over multipart sends the string,
+      # and before the cast it arrived here as an explicit yes.
+      it 'leaves the voice flag off for a flag the caller sent as the string false' do
+        message = create(:message, message_type: :outgoing, content: nil, conversation: conversation)
+        Messages::MessageBuilder.new(
+          nil, message.conversation,
+          ActionController::Parameters.new(
+            content: nil,
+            attachments: [Rack::Test::UploadedFile.new('spec/assets/sample.mp3', 'audio/mpeg')],
+            attachments_metadata: { 'sample.mp3' => { is_voice_message: 'false' } }
+          )
+        ).perform
+
+        built = message.conversation.messages.last
+        expect(built.attachments.first.meta).to include('is_voice_message' => false)
+        expect(service.send(:voice_message?, 'audio', built.attachments.first)).to be(false)
+      end
+
+      # A caller that says "this is not a voice message" is not the same as one that says nothing,
+      # and both have to come out the same way: no flag. Both keys are set, because `false || nil`
+      # is `nil` and would let a presence check and a nil check agree by accident. The API lets a
+      # caller write either key through `attachments_metadata`.
+      it 'leaves the voice flag off when the meta says false rather than being absent' do
+        attachment = message.attachments.new(account_id: message.account_id, file_type: :audio,
+                                             meta: { 'is_voice_message' => false, 'is_recorded_audio' => false })
+        attachment.file.attach(io: Rails.root.join('spec/assets/sample_opus.ogg').open, filename: 'voice.ogg')
 
         stub_request(:post, 'https://graph.facebook.com/v24.0/123456789/messages')
           .with(
@@ -161,7 +263,29 @@ describe Whatsapp::Providers::WhatsappCloudService do
           )
           .to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
 
-        # Ensure voice flag is NOT present for non-ogg audio
+        expect(service.send_message('+123456789', message)).to eq 'message_id'
+        expect(WebMock).not_to(have_requested(:post, 'https://graph.facebook.com/v24.0/123456789/messages')
+          .with { |req| JSON.parse(req.body).dig('audio', 'voice') })
+      end
+
+      # The list is WhatsApp's, not "any audio". A type it does not accept for voice has to go out
+      # as a plain audio attachment, or the send fails after the fact with an error about the type.
+      it 'leaves the voice flag off for an audio type WhatsApp does not accept for voice' do
+        attachment = message.attachments.new(account_id: message.account_id, file_type: :audio,
+                                             meta: { 'is_recorded_audio' => true })
+        attachment.file.attach(io: Rails.root.join('spec/assets/sample.wav').open, filename: 'sample.wav')
+
+        stub_request(:post, 'https://graph.facebook.com/v24.0/123456789/messages')
+          .with(
+            body: hash_including({
+                                   messaging_product: 'whatsapp',
+                                   to: '+123456789',
+                                   type: 'audio',
+                                   audio: WebMock::API.hash_including({ link: anything })
+                                 })
+          )
+          .to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
+
         expect(service.send_message('+123456789', message)).to eq 'message_id'
         expect(WebMock).not_to(have_requested(:post, 'https://graph.facebook.com/v24.0/123456789/messages')
           .with { |req| JSON.parse(req.body).dig('audio', 'voice') })
@@ -190,7 +314,9 @@ describe Whatsapp::Providers::WhatsappCloudService do
         attachment.save!
         # Simulate Marcel detecting audio/opus (as happens with OGG Opus files in Marcel 1.1.0)
         attachment.file.blob.update_column(:content_type, 'audio/opus') # rubocop:disable Rails/SkipsModelValidations
-        attachment.file.blob.reload
+        # The service reads the attachment the way a job does, straight from the database. Without
+        # dropping the association cache it would keep the pre-update blob and never normalize.
+        message.attachments.reload
 
         stub_request(:post, 'https://graph.facebook.com/v24.0/123456789/messages')
           .with(
@@ -306,35 +432,173 @@ describe Whatsapp::Providers::WhatsappCloudService do
     end
   end
 
+  describe 'when the recipient is a Business-Scoped User ID (BSUID)' do
+    # Meta requires a BSUID to be sent in the `recipient` field (with recipient_type: individual), not `to`.
+    let(:bsuid) { 'BR.13491208655302741918' }
+
+    it 'sends a text message via the recipient field instead of to' do
+      stub_request(:post, 'https://graph.facebook.com/v13.0/123456789/messages')
+        .with(
+          body: {
+            messaging_product: 'whatsapp',
+            context: nil,
+            recipient_type: 'individual',
+            recipient: bsuid,
+            text: { body: message.content },
+            type: 'text'
+          }.to_json
+        )
+        .to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
+
+      expect(service.send_message(bsuid, message)).to eq 'message_id'
+    end
+
+    it 'sends a template via the recipient field instead of to' do
+      template_info = { name: 'test_template', namespace: 'test_namespace', lang_code: 'en_US', parameters: [] }
+      stub_request(:post, 'https://graph.facebook.com/v13.0/123456789/messages')
+        .with(body: hash_including({ messaging_product: 'whatsapp', recipient_type: 'individual', recipient: bsuid, type: 'template' }))
+        .to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
+
+      expect(service.send_template(bsuid, template_info, message)).to eq 'message_id'
+    end
+
+    it 'sends an interactive message via the recipient field instead of to' do
+      interactive_message = create(:message, message_type: :outgoing, content: 'test', inbox: whatsapp_channel.inbox,
+                                             content_type: 'input_select',
+                                             content_attributes: { items: [{ title: 'Burito', value: 'Burito' }] })
+      stub_request(:post, 'https://graph.facebook.com/v13.0/123456789/messages')
+        .with(body: hash_including({ messaging_product: 'whatsapp', recipient_type: 'individual', recipient: bsuid, type: 'interactive' }))
+        .to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
+
+      expect(service.send_message(bsuid, interactive_message)).to eq 'message_id'
+    end
+
+    it 'sends an attachment via the recipient field instead of to' do
+      attachment = message.attachments.new(account_id: message.account_id, file_type: :image)
+      attachment.file.attach(io: Rails.root.join('spec/assets/avatar.png').open, filename: 'avatar.png', content_type: 'image/png')
+
+      stub_request(:post, 'https://graph.facebook.com/v24.0/123456789/messages')
+        .with(body: hash_including({ messaging_product: 'whatsapp', recipient_type: 'individual', recipient: bsuid, type: 'image' }))
+        .to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
+
+      expect(service.send_message(bsuid, message)).to eq 'message_id'
+    end
+  end
+
   describe '#sync_templates' do
     context 'when called' do
+      context 'with a business management token' do
+        let(:business_management_token) { 'business-token' }
+
+        before { allow(ChatwootApp).to receive(:chatwoot_cloud?).and_return(true) }
+
+        it 'uses it instead of the provider API key' do
+          request = stub_request(
+            :get,
+            'https://graph.facebook.com/v14.0/123456789/message_templates'
+          ).with(
+            headers: { 'Authorization' => 'Bearer business-token' }
+          ).to_return(status: 200, headers: response_headers, body: { data: [] }.to_json)
+
+          subject.sync_templates
+
+          expect(request).to have_been_requested
+        end
+      end
+
+      context 'without a business management token' do
+        before { allow(ChatwootApp).to receive(:chatwoot_cloud?).and_return(true) }
+
+        it 'uses the provider API key' do
+          request = stub_request(
+            :get,
+            'https://graph.facebook.com/v14.0/123456789/message_templates'
+          ).with(
+            headers: { 'Authorization' => 'Bearer test_key' }
+          ).to_return(status: 200, headers: response_headers, body: { data: [] }.to_json)
+
+          subject.sync_templates
+
+          expect(request).to have_been_requested
+        end
+      end
+
+      context 'with a stored business management token outside Chatwoot Cloud' do
+        let(:business_management_token) { 'business-token' }
+
+        before { allow(ChatwootApp).to receive(:chatwoot_cloud?).and_return(false) }
+
+        it 'uses the provider API key' do
+          request = stub_request(
+            :get,
+            'https://graph.facebook.com/v14.0/123456789/message_templates'
+          ).with(
+            headers: { 'Authorization' => 'Bearer test_key' }
+          ).to_return(status: 200, headers: response_headers, body: { data: [] }.to_json)
+
+          subject.sync_templates
+
+          expect(request).to have_been_requested
+        end
+      end
+
       it 'updated the message templates' do
-        stub_request(:get, 'https://graph.facebook.com/v14.0/123456789/message_templates?access_token=test_key')
+        request_headers = { 'Authorization' => 'Bearer test_key' }
+        stub_request(:get, 'https://graph.facebook.com/v14.0/123456789/message_templates')
+          .with(headers: request_headers)
           .to_return(
-            { status: 200, headers: response_headers,
-              body: { data: [
-                { id: '123456789', name: 'test_template' }
-              ], paging: { next: 'https://graph.facebook.com/v14.0/123456789/message_templates?access_token=test_key' } }.to_json },
-            { status: 200, headers: response_headers,
-              body: { data: [
-                { id: '123456789', name: 'next_template' }
-              ], paging: { next: 'https://graph.facebook.com/v14.0/123456789/message_templates?access_token=test_key' } }.to_json },
-            { status: 200, headers: response_headers,
-              body: { data: [
-                { id: '123456789', name: 'last_template' }
-              ], paging: { prev: 'https://graph.facebook.com/v14.0/123456789/message_templates?access_token=test_key' } }.to_json }
+            status: 200,
+            headers: response_headers,
+            body: {
+              data: [{ id: '123456789', name: 'test_template' }],
+              paging: {
+                cursors: { after: 'cursor-1' },
+                next: 'https://graph.facebook.com/v14.0/123456789/message_templates?after=cursor-1&access_token=test_key'
+              }
+            }.to_json
+          )
+        stub_request(:get, 'https://graph.facebook.com/v14.0/123456789/message_templates?after=cursor-1')
+          .with(headers: request_headers)
+          .to_return(
+            status: 200,
+            headers: response_headers,
+            body: {
+              data: [{ id: '123456789', name: 'next_template' }],
+              paging: {
+                cursors: { after: 'cursor-2' },
+                next: 'https://graph.facebook.com/v14.0/123456789/message_templates?after=cursor-2&access_token=test_key'
+              }
+            }.to_json
+          )
+        stub_request(:get, 'https://graph.facebook.com/v14.0/123456789/message_templates?after=cursor-2')
+          .with(headers: request_headers)
+          .to_return(
+            status: 200,
+            headers: response_headers,
+            body: { data: [{ id: '123456789', name: 'last_template' }] }.to_json
           )
 
         timstamp = whatsapp_channel.reload.message_templates_last_updated
-        expect(subject.sync_templates).to be(true)
+        expect(whatsapp_channel.account).to receive(:update_cache_key).with('inbox').and_call_original
+        subject.sync_templates
         expect(whatsapp_channel.reload.message_templates.first).to eq({ id: '123456789', name: 'test_template' }.stringify_keys)
         expect(whatsapp_channel.reload.message_templates.second).to eq({ id: '123456789', name: 'next_template' }.stringify_keys)
         expect(whatsapp_channel.reload.message_templates.last).to eq({ id: '123456789', name: 'last_template' }.stringify_keys)
         expect(whatsapp_channel.reload.message_templates_last_updated).not_to eq(timstamp)
       end
 
+      it 'does not bump the inbox cache key when no templates are returned' do
+        stub_request(:get, 'https://graph.facebook.com/v14.0/123456789/message_templates')
+          .with(headers: { 'Authorization' => 'Bearer test_key' })
+          .to_return(status: 200, headers: response_headers, body: { data: [] }.to_json)
+
+        expect(whatsapp_channel.account).not_to receive(:update_cache_key)
+        subject.sync_templates
+      end
+
       it 'updates message_templates_last_updated even when template request fails' do
-        stub_request(:get, 'https://graph.facebook.com/v14.0/123456789/message_templates?access_token=test_key')
+        stub_request(:get, 'https://graph.facebook.com/v14.0/123456789/message_templates')
+          .with(headers: { 'Authorization' => 'Bearer test_key' })
           .to_return(status: 401)
 
         timstamp = whatsapp_channel.reload.message_templates_last_updated
@@ -626,6 +890,57 @@ describe Whatsapp::Providers::WhatsappCloudService do
         .to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
 
       expect(service.send_message('+123456789', message_with_reaction)).to eq 'message_id'
+    end
+  end
+
+  describe '#upload_media' do
+    let(:upload_url) { 'https://graph.facebook.com/v24.0/123456789/media' }
+    let(:file) { Tempfile.new(['sample', '.jpg']) }
+
+    after { file.close! }
+
+    it 'returns the media id' do
+      stub_request(:post, upload_url).to_return(status: 200, body: { id: '4565669250245108' }.to_json, headers: response_headers)
+
+      expect(service.upload_media(file, 'image/jpeg')).to eq '4565669250245108'
+    end
+
+    # `error.message` for a rejected upload is only "(#100) Invalid parameter"; the actionable reason
+    # (sample media above Meta's size limit, unsupported format) lives in `error_data.details`.
+    it 'raises with the detail Meta gives, not the generic message' do
+      body = {
+        error: {
+          message: '(#100) Invalid parameter',
+          code: 100,
+          error_data: { messaging_product: 'whatsapp', details: 'File Too Large: The file you uploaded is too large.' }
+        }
+      }
+      stub_request(:post, upload_url).to_return(status: 400, body: body.to_json, headers: response_headers)
+
+      expect { service.upload_media(file, 'video/mp4') }
+        .to raise_error(CustomExceptions::Whatsapp::MediaUploadError, /File Too Large/)
+    end
+
+    # MediaUploadError fails the message for good, so a blip must not raise it.
+    it 'lets a server error propagate so the job can be retried' do
+      stub_request(:post, upload_url).to_return(status: 503, body: '', headers: response_headers)
+
+      expect { service.upload_media(file, 'image/jpeg') }.to raise_error(Net::HTTPFatalError)
+    end
+
+    it 'lets a rate limit propagate so the job can be retried' do
+      stub_request(:post, upload_url).to_return(status: 429, body: '', headers: response_headers)
+
+      expect { service.upload_media(file, 'image/jpeg') }.to raise_error(Net::HTTPClientException)
+    end
+
+    # Graph reports throttling and other passing conditions inside a 400 envelope, so the status alone
+    # would read them as a rejected file.
+    it 'lets a transient error dressed as HTTP 400 propagate so the job can be retried' do
+      body = { error: { message: '(#4) Application request limit reached', code: 4, is_transient: true } }
+      stub_request(:post, upload_url).to_return(status: 400, body: body.to_json, headers: response_headers)
+
+      expect { service.upload_media(file, 'image/jpeg') }.to raise_error(Net::HTTPClientException)
     end
   end
 end

@@ -15,11 +15,19 @@ class AccountPolicy < ApplicationPolicy
     @account_user.administrator?
   end
 
+  def brand_logo_email?
+    @account_user.administrator?
+  end
+
   def update_active_at?
     true
   end
 
   def subscription?
+    @account_user.administrator?
+  end
+
+  def select_billing_currency?
     @account_user.administrator?
   end
 
@@ -32,6 +40,10 @@ class AccountPolicy < ApplicationPolicy
   end
 
   def topup_checkout?
+    @account_user.administrator?
+  end
+
+  def topup_options?
     @account_user.administrator?
   end
 end

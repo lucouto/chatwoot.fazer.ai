@@ -67,18 +67,24 @@ module Enterprise::Concerns::Article
       { role: 'system', content: article_to_search_terms_prompt },
       { role: 'user', content: "title: #{title} \n description: #{description} \n content: #{content}" }
     ]
-    headers = { 'Content-Type' => 'application/json', 'Authorization' => "Bearer #{ENV.fetch('OPENAI_API_KEY', nil)}" }
+    headers = { 'Content-Type' => 'application/json', 'Authorization' => "Bearer #{openai_api_key}" }
     body = { model: 'gpt-4o', messages: messages, response_format: { type: 'json_object' } }.to_json
     Rails.logger.info "Requesting Chat GPT with body: #{body}"
-    response = HTTParty.post(openai_api_url, headers: headers, body: body)
+    # A chat completion: the thinking time before the first byte is the point of the call.
+    # `max_retries: 0` because a repeat is a second answer and a second bill.
+    response = HTTParty.post(openai_api_url, headers: headers, body: body, timeout: 120, max_retries: 0)
     Rails.logger.info "Chat GPT response: #{response.body}"
     JSON.parse(response.parsed_response['choices'][0]['message']['content'])['search_terms']
   end
 
   private
 
+  def openai_api_key
+    InstallationConfig.find_by(name: 'CAPTAIN_OPEN_AI_API_KEY')&.value.presence || raise(I18n.t('captain.api_key_missing'))
+  end
+
   def openai_api_url
-    endpoint = InstallationConfig.find_by(name: 'CAPTAIN_OPEN_AI_ENDPOINT')&.value || 'https://api.openai.com/'
+    endpoint = InstallationConfig.find_by(name: 'CAPTAIN_OPEN_AI_ENDPOINT')&.value.presence || 'https://api.openai.com/'
     endpoint = endpoint.chomp('/')
     "#{endpoint}/v1/chat/completions"
   end

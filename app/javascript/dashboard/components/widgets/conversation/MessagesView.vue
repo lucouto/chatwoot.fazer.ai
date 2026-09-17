@@ -15,12 +15,15 @@ import ConversationLabelSuggestion from './conversation/LabelSuggestion.vue';
 import Banner from 'dashboard/components/ui/Banner.vue';
 import Spinner from 'dashboard/components-next/spinner/Spinner.vue';
 import ResizableEditorWrapper from './ResizableEditorWrapper.vue';
+import ReferralBubble from 'dashboard/components-next/Conversation/ReferralBubble.vue';
+import ConversationHistorySync from './ConversationHistorySync.vue';
 
 // stores and apis
 import { mapGetters } from 'vuex';
 
 // mixins
 import inboxMixin, { INBOX_FEATURES } from 'shared/mixins/inboxMixin';
+import { CAPABILITIES } from 'dashboard/helper/whatsappSession';
 
 // utils
 import { emitter } from 'shared/helpers/mitt';
@@ -36,11 +39,21 @@ import {
 // constants
 import { BUS_EVENTS } from 'shared/constants/busEvents';
 import { REPLY_POLICY } from 'shared/constants/links';
-import wootConstants from 'dashboard/constants/globals';
+import wootConstants, {
+  META_RESTRICTION_STATUS_URL,
+} from 'dashboard/constants/globals';
 import { LOCAL_STORAGE_KEYS } from 'dashboard/constants/localStorage';
 import { INBOX_TYPES } from 'dashboard/helper/inbox';
 import WhatsappLinkDeviceModal from '../../../routes/dashboard/settings/inbox/components/WhatsappLinkDeviceModal.vue';
 import { isInboxAdminInGroup } from 'dashboard/helper/phoneHelper';
+import {
+  isReachoutRestricted,
+  isSendStalled,
+  reachoutRestrictionDeadline,
+  isMessageCapped,
+  isMessageCapReached,
+  messageCapQuota,
+} from 'dashboard/helper/whatsapp';
 
 export default {
   components: {
@@ -51,6 +64,8 @@ export default {
     Spinner,
     ResizableEditorWrapper,
     WhatsappLinkDeviceModal,
+    ReferralBubble,
+    ConversationHistorySync,
   },
   mixins: [inboxMixin],
   setup() {
@@ -115,7 +130,7 @@ export default {
       currentUser: 'getCurrentUser',
       listLoadingStatus: 'getAllMessagesLoaded',
       currentAccountId: 'getCurrentAccountId',
-      globalConfig: 'globalConfig/get',
+      isMetaMessageSendingDisabled: 'globalConfig/isMetaMessageSendingDisabled',
     }),
     currentInbox() {
       return this.$store.getters['inboxes/getInbox'](this.currentChat.inbox_id);
@@ -163,6 +178,9 @@ export default {
       }
       return messages;
     },
+    referralData() {
+      return this.currentChat?.additional_attributes?.referral || null;
+    },
     readMessages() {
       return getReadMessages(
         this.getMessages,
@@ -173,6 +191,34 @@ export default {
       return getUnreadMessages(
         this.getMessages,
         this.currentChat.agent_last_seen_at
+      );
+    },
+    // Offered once the thread has been read back to the beginning of what this inbox
+    // holds, which is the moment the missing history becomes visible as an absence.
+    //
+    // Two ways to be at that beginning, and the store only knows one of them.
+    // `listLoadingStatus` (its `getAllMessagesLoaded` under an older name) is set when a
+    // fetch for older messages comes back empty, so it needs a scroll to the top to ever
+    // become true -- and a thread short enough to fit on screen is never scrolled, so it
+    // would never offer this. A first page that came back short is the other way: the
+    // server sends at most MessageFinder::PAGE_LIMIT, which is 20, so fewer than that
+    // means there was never a second page to ask for.
+    canRequestOlderMessages() {
+      const exhausted = this.listLoadingStatus || this.getMessages.length < 20;
+
+      return Boolean(
+        this.currentChat?.id &&
+          this.currentChat.dataFetched &&
+          this.hasInboxCapability(CAPABILITIES.HISTORY_SYNC) &&
+          exhausted &&
+          !this.isLoadingPrevious
+      );
+    },
+    // WhatsApp answered a request for this chat saying it holds nothing older. It only
+    // ever says so in that answer, so this stays false until somebody has asked once.
+    historyExhausted() {
+      return Boolean(
+        this.currentChat?.additional_attributes?.history_exhausted
       );
     },
     shouldShowSpinner() {
@@ -196,7 +242,12 @@ export default {
         instagramInbox
       );
     },
-
+    isInstagramRestrictionBannerVisible() {
+      return this.isMetaMessageSendingDisabled && this.isAnInstagramChannel;
+    },
+    instagramRestrictionStatusUrl() {
+      return META_RESTRICTION_STATUS_URL;
+    },
     replyWindowBannerMessage() {
       if (this.isAWhatsAppChannel) {
         return this.$t('CONVERSATION.TWILIO_WHATSAPP_CAN_REPLY');
@@ -271,15 +322,10 @@ export default {
       return { incoming, outgoing };
     },
     inboxSupportsEdit() {
-      // Currently only Baileys WhatsApp channel supports message editing
-      return this.isAWhatsAppBaileysChannel;
+      return this.hasInboxCapability(CAPABILITIES.EDIT);
     },
     inboxSupportsReactions() {
-      return (
-        this.isAWhatsAppCloudChannel ||
-        this.isAWhatsAppBaileysChannel ||
-        this.isAWhatsAppZapiChannel
-      );
+      return this.hasInboxCapability(CAPABILITIES.REACTIONS);
     },
     currentContact() {
       const senderId = this.currentChat?.meta?.sender?.id;
@@ -288,6 +334,21 @@ export default {
     },
     isGroupConversation() {
       return this.currentChat?.group_type === 'group';
+    },
+    // The inbox is part of the target, not only the contact. A group contact is
+    // account-scoped, so the same group can be open in two inboxes of one account, and
+    // what the panel may do there is answered per inbox. Keyed on the contact alone,
+    // switching between the two threads kept the first inbox's answer.
+    groupMembersFetchTarget() {
+      if (!this.groupContactId || !this.isGroupConversation) return null;
+      // `groups` and not `group_management`: this fetch reads the GroupMember rows the
+      // inbound path already filed, through Chatwoot's own API, and never reaches the
+      // provider. Asking for the command surface here would leave a receive-only inbox
+      // without `is_inbox_admin`, and an announcement-only group would look replyable
+      // until the server refused the message.
+      if (!this.hasInboxCapability(CAPABILITIES.GROUPS)) return null;
+
+      return `${this.groupContactId}:${this.currentChat?.inbox_id}`;
     },
     groupContactId() {
       return this.currentChat?.meta?.sender?.id || null;
@@ -304,7 +365,8 @@ export default {
       if (!this.groupContactId) return {};
       return (
         this.$store.getters['groupMembers/getGroupMembersMeta'](
-          this.groupContactId
+          this.groupContactId,
+          this.currentChat?.inbox_id
         ) || {}
       );
     },
@@ -320,25 +382,31 @@ export default {
     },
     isAnnouncementModeRestricted() {
       return (
-        this.isAWhatsAppBaileysChannel &&
+        this.isASessionWhatsAppChannel &&
         this.isGroupConversation &&
         this.currentContact?.additional_attributes?.announce === true &&
         this.isGroupMembersLoaded &&
         !this.isInboxAdminInCurrentGroup
       );
     },
+    // Read off the conversation, not off the contact: a group contact is
+    // account-scoped and the same group can be open in two inboxes of one account,
+    // where only one of them may have left. The server answers for this thread's own
+    // number.
     isGroupLeft() {
       return (
-        this.isAWhatsAppBaileysChannel &&
+        this.isASessionWhatsAppChannel &&
         this.isGroupConversation &&
-        this.currentContact?.additional_attributes?.group_left === true
+        this.currentChat?.group_left === true
       );
     },
     isGroupsDisabled() {
+      // The server already strips the group capabilities when the kill switch is off, so
+      // the absence of `groups` is what "disabled" means here — for every provider.
       return (
-        this.isAWhatsAppBaileysChannel &&
+        this.isASessionWhatsAppChannel &&
         this.isGroupConversation &&
-        !this.globalConfig.baileysWhatsappGroupsEnabled
+        !this.hasInboxCapability(CAPABILITIES.GROUPS)
       );
     },
     isSuperAdmin() {
@@ -346,6 +414,85 @@ export default {
     },
     inboxProviderConnection() {
       return this.currentInbox.provider_connection?.connection;
+    },
+    inboxReachoutLock() {
+      return this.currentInbox.provider_connection?.reachout_time_lock;
+    },
+    showSendStallWarning() {
+      return isSendStalled(
+        this.currentInbox.provider_connection?.send_stall,
+        this.inboxProviderConnection
+      );
+    },
+    providerConnectionBannerMessage() {
+      if (this.showSendStallWarning) {
+        return this.isAdmin
+          ? this.$t(
+              'CONVERSATION.INBOX.WHATSAPP_PROVIDER_CONNECTION.SEND_STALL'
+            )
+          : this.$t(
+              'CONVERSATION.INBOX.WHATSAPP_PROVIDER_CONNECTION.SEND_STALL_CONTACT_ADMIN'
+            );
+      }
+      return this.isAdmin
+        ? this.$t(
+            'CONVERSATION.INBOX.WHATSAPP_PROVIDER_CONNECTION.NOT_CONNECTED'
+          )
+        : this.$t(
+            'CONVERSATION.INBOX.WHATSAPP_PROVIDER_CONNECTION.NOT_CONNECTED_CONTACT_ADMIN'
+          );
+    },
+    // The agent's shortcut is a reconnect, and on a stall it is worse than nothing: it
+    // reaches a provider that already considers this socket live, refreshes presence, and
+    // reports success while the inbox stays mute. Only an admin has an action here.
+    providerConnectionBannerHasAction() {
+      return this.isAdmin || !this.showSendStallWarning;
+    },
+    showReachoutRestriction() {
+      return isReachoutRestricted(
+        this.inboxReachoutLock,
+        this.inboxProviderConnection
+      );
+    },
+    reachoutRestrictionMessage() {
+      const deadline = reachoutRestrictionDeadline(this.inboxReachoutLock);
+      return deadline
+        ? this.$t(
+            'CONVERSATION.INBOX.WHATSAPP_REACHOUT_RESTRICTION.RESTRICTED_UNTIL',
+            { time: deadline }
+          )
+        : this.$t(
+            'CONVERSATION.INBOX.WHATSAPP_REACHOUT_RESTRICTION.RESTRICTED'
+          );
+    },
+    inboxNewChatCap() {
+      return this.currentInbox.provider_connection?.new_chat_cap;
+    },
+    showMessageCap() {
+      return isMessageCapped(
+        this.inboxNewChatCap,
+        this.inboxProviderConnection
+      );
+    },
+    messageCapBannerScheme() {
+      return isMessageCapReached(this.inboxNewChatCap) ? 'alert' : 'warning';
+    },
+    messageCapMessage() {
+      const quota = messageCapQuota(this.inboxNewChatCap);
+      if (isMessageCapReached(this.inboxNewChatCap)) {
+        return quota
+          ? this.$t(
+              'CONVERSATION.INBOX.WHATSAPP_NEW_CHAT_CAP.CAPPED_WITH_QUOTA',
+              quota
+            )
+          : this.$t('CONVERSATION.INBOX.WHATSAPP_NEW_CHAT_CAP.CAPPED');
+      }
+      return quota
+        ? this.$t(
+            'CONVERSATION.INBOX.WHATSAPP_NEW_CHAT_CAP.WARNING_WITH_QUOTA',
+            quota
+          )
+        : this.$t('CONVERSATION.INBOX.WHATSAPP_NEW_CHAT_CAP.WARNING');
     },
   },
 
@@ -359,17 +506,17 @@ export default {
       this.messageSentSinceOpened = false;
       this.resetReplyEditorHeight();
     },
-    groupContactId: {
+    // Watches the whole condition, not just the contact. The capability arrives with the
+    // inbox, and that request can land after this component mounts, so a watcher keyed on
+    // the contact alone saw no capability, skipped the fetch and never ran again: a group
+    // thread stayed without members until the agent switched conversations.
+    groupMembersFetchTarget: {
       immediate: true,
-      handler(contactId) {
-        if (
-          contactId &&
-          this.isAWhatsAppBaileysChannel &&
-          this.isGroupConversation &&
-          !this.isGroupMembersLoaded
-        ) {
+      handler(target) {
+        if (target && !this.isGroupMembersLoaded) {
           this.$store.dispatch('groupMembers/fetch', {
-            contactId,
+            contactId: this.groupContactId,
+            inboxId: this.currentChat?.inbox_id,
           });
         }
       },
@@ -779,7 +926,7 @@ export default {
     class="flex flex-col justify-between flex-grow h-full min-w-0 m-0"
   >
     <div ref="topBannerRef">
-      <template v-if="isAWhatsAppBaileysChannel || isAWhatsAppZapiChannel">
+      <template v-if="isASessionWhatsAppChannel">
         <WhatsappLinkDeviceModal
           v-if="showLinkDeviceModal"
           :show="showLinkDeviceModal"
@@ -787,19 +934,11 @@ export default {
           :inbox="currentInbox"
         />
         <Banner
-          v-if="inboxProviderConnection !== 'open'"
+          v-if="inboxProviderConnection !== 'open' || showSendStallWarning"
           color-scheme="alert"
           class="mt-2 mx-2 rounded-lg overflow-hidden"
-          :banner-message="
-            isAdmin
-              ? $t(
-                  'CONVERSATION.INBOX.WHATSAPP_PROVIDER_CONNECTION.NOT_CONNECTED'
-                )
-              : $t(
-                  'CONVERSATION.INBOX.WHATSAPP_PROVIDER_CONNECTION.NOT_CONNECTED_CONTACT_ADMIN'
-                )
-          "
-          has-action-button
+          :banner-message="providerConnectionBannerMessage"
+          :has-action-button="providerConnectionBannerHasAction"
           :action-button-label="
             isAdmin
               ? $t(
@@ -812,7 +951,27 @@ export default {
             isAdmin ? onOpenLinkDeviceModal() : onSetupProviderConnection()
           "
         />
+        <Banner
+          v-if="showReachoutRestriction"
+          color-scheme="alert"
+          class="mt-2 mx-2 rounded-lg overflow-hidden"
+          :banner-message="reachoutRestrictionMessage"
+        />
+        <Banner
+          v-if="showMessageCap"
+          :color-scheme="messageCapBannerScheme"
+          class="mt-2 mx-2 rounded-lg overflow-hidden"
+          :banner-message="messageCapMessage"
+        />
       </template>
+      <Banner
+        v-if="isInstagramRestrictionBannerVisible"
+        color-scheme="warning"
+        class="mx-2 mt-2 min-h-12 !h-auto rounded-lg"
+        :banner-message="$t('CONVERSATION.INSTAGRAM_RESTRICTION_BANNER')"
+        :href-link="instagramRestrictionStatusUrl"
+        :href-link-text="$t('CONVERSATION.INSTAGRAM_RESTRICTION_STATUS_LINK')"
+      />
       <Banner
         v-if="!currentChat.can_reply"
         color-scheme="alert"
@@ -822,7 +981,7 @@ export default {
         :href-link-text="replyWindowLinkText"
       />
       <Banner
-        v-else-if="hasDuplicateInstagramInbox"
+        v-if="hasDuplicateInstagramInbox"
         color-scheme="alert"
         class="mx-2 mt-2 overflow-hidden rounded-lg"
         :banner-message="$t('CONVERSATION.OLD_INSTAGRAM_INBOX_REPLY_BANNER')"
@@ -878,6 +1037,12 @@ export default {
             <Spinner v-if="shouldShowSpinner" class="text-n-brand" />
           </li>
         </transition>
+        <ConversationHistorySync
+          v-if="canRequestOlderMessages"
+          :conversation-id="currentChat.id"
+          :exhausted="historyExhausted"
+        />
+        <ReferralBubble v-if="referralData" :referral="referralData" />
       </template>
       <template #unreadBadge>
         <li

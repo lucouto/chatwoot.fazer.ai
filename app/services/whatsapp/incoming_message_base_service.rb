@@ -249,7 +249,7 @@ class Whatsapp::IncomingMessageBaseService # rubocop:disable Metrics/ClassLength
   def create_contact_messages(message)
     message['contacts'].each do |contact|
       # Pass source_id from parent message since contact objects don't have :id
-      create_message(contact, source_id: message[:id])
+      create_message(contact, source_id: message[:id], content_attributes_source: message)
       attach_contact(contact)
       @message.save!
     end
@@ -311,12 +311,14 @@ class Whatsapp::IncomingMessageBaseService # rubocop:disable Metrics/ClassLength
   end
 
   def conversation_by_inbox_config
+    # Scope reuse to the contact across all its contact_inboxes in this inbox: WhatsApp coexistence
+    # gives one contact multiple source_ids (phone + BSUID), so reopen must not be limited to a single contact_inbox.
+    conversations = @contact.conversations.where(inbox_id: @inbox.id)
     # if lock to single conversation is disabled, we will create a new conversation if previous conversation is resolved
     if @inbox.lock_to_single_conversation
-      @inbox.conversations.where(contact_id: @contact_inbox.contact_id).last
+      conversations.last
     else
-      @contact_inbox.conversations
-                    .where.not(status: :resolved).last
+      conversations.where.not(status: :resolved).last
     end
   end
 
@@ -354,7 +356,7 @@ class Whatsapp::IncomingMessageBaseService # rubocop:disable Metrics/ClassLength
     )
   end
 
-  def create_message(message, source_id: nil)
+  def create_message(message, source_id: nil, content_attributes_source: message)
     @message = @conversation.messages.build(
       content: message_content(message),
       account_id: @inbox.account_id,
@@ -364,17 +366,28 @@ class Whatsapp::IncomingMessageBaseService # rubocop:disable Metrics/ClassLength
       status: outgoing_echo ? :delivered : :sent,
       sender: outgoing_echo ? nil : @contact,
       source_id: (source_id || message[:id]).to_s,
-      content_attributes: build_content_attributes(message)
+      content_attributes: message_content_attributes(content_attributes_source)
     )
   end
 
-  def build_content_attributes(message)
+  def message_content_attributes(message)
     content_attrs = outgoing_echo ? { external_echo: true } : {}
+    content_attrs[:in_reply_to] = in_reply_to_message_id if in_reply_to_message_id.present?
     content_attrs[:in_reply_to_external_id] = @in_reply_to_external_id if @in_reply_to_external_id.present?
     content_attrs[:external_created_at] = message[:timestamp].to_i
     content_attrs[:is_reaction] = true if message_type == 'reaction'
     referral = normalize_cloud_referral(message)
     content_attrs[:referral] = referral if referral.present?
+
+    flow_response = message.dig(:interactive, :nfm_reply)
+    if flow_response.present?
+      content_attrs[:whatsapp_flow_response] = {
+        name: flow_response[:name],
+        body: flow_response[:body],
+        response_json: parse_flow_response_json(flow_response[:response_json])
+      }.compact
+    end
+
     content_attrs
   end
 
@@ -418,3 +431,5 @@ class Whatsapp::IncomingMessageBaseService # rubocop:disable Metrics/ClassLength
     @contact.name == phone_number || @contact.name == formatted_phone_number
   end
 end
+
+Whatsapp::IncomingMessageBaseService.prepend_mod_with('Whatsapp::IncomingMessageBaseService')

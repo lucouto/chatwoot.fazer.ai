@@ -34,6 +34,7 @@
 #  index_messages_on_conversation_id                    (conversation_id)
 #  index_messages_on_created_at                         (created_at)
 #  index_messages_on_inbox_id                           (inbox_id)
+#  index_messages_on_sender_and_created                 (sender_type,sender_id,created_at)
 #  index_messages_on_sender_type_and_sender_id          (sender_type,sender_id)
 #  index_messages_on_source_id                          (source_id)
 #
@@ -56,6 +57,7 @@ class Message < ApplicationRecord
           'category': { 'type': 'string' },
           'language': { 'type': 'string' },
           'namespace': { 'type': 'string' },
+          'content_mode': { 'type': 'string', 'enum': %w[raw_template rendered] },
           'processed_params': { 'type': 'object' }
         },
         'required': %w[name]
@@ -88,6 +90,10 @@ class Message < ApplicationRecord
   # NOTE: Allow skipping message flooding validation for bulk operations like imports/cloning
   attr_accessor :skip_message_flooding_validation
 
+  # Set by a caller that writes an edit before the channel has taken it, so the announcement waits for
+  # the channel's answer instead of going out on the optimistic write. See `#announce_edit`.
+  attr_accessor :defer_edit_announcement
+
   enum message_type: { incoming: 0, outgoing: 1, activity: 2, template: 3 }
   enum content_type: {
     text: 0,
@@ -118,12 +124,15 @@ class Message < ApplicationRecord
   # [:referral] : Click-to-WhatsApp ad metadata (source ad, headline, ctwa_clid, ...) attached to the first message after an ad click
   # [:rich] : Structured WhatsApp "rich" message (template/interactive/buttons/list) with title/body/footer/buttons rendered as a card
   # [:deleted_by_contact] : The contact deleted/revoked the message on WhatsApp; we keep the content visible and only flag it
+  # [:pending_source_id] : Provider message id reserved before the send (Baileys), used to match the provider echo back to this row
+  # [:edited_at] : Provider timestamp (ms) of the edit currently stored, so an edit that arrives out of order is refused
+  # [:is_masked] : WhatsApp withheld the content from linked devices (verification codes); set alongside :is_unsupported
 
   store :content_attributes, accessors: [:submitted_email, :items, :submitted_values, :email, :in_reply_to, :deleted,
                                          :external_created_at, :story_sender, :story_id, :external_error,
                                          :translations, :in_reply_to_external_id, :is_unsupported, :data,
                                          :is_reaction, :is_edited, :previous_content, :zapi_args, :referral, :rich,
-                                         :deleted_by_contact], coder: JSON
+                                         :deleted_by_contact, :pending_source_id, :edited_at, :is_masked], coder: JSON
 
   store :external_source_ids, accessors: [:slack], coder: JSON, prefix: :external_source_id
 
@@ -252,6 +261,33 @@ class Message < ApplicationRecord
     ActiveModel::Type::Boolean.new.cast(content_attributes['is_reaction']) == true
   end
 
+  def deleted?
+    ActiveModel::Type::Boolean.new.cast(content_attributes['deleted']) == true
+  end
+
+  # A removed reaction is a deleted row on purpose. WhatsApp allows one reaction per
+  # (message, sender), so Chatwoot reuses the row and marks it deleted rather than
+  # accumulating one per toggle, and the empty content it then carries is exactly the
+  # payload that clears the reaction on the contact's phone. Every guard that keeps a
+  # deleted message off the channel has to let this one through, or the emoji disappears
+  # in Chatwoot and stays on the contact's phone forever.
+  def removed_reaction?
+    deleted? && content_attributes['is_reaction'].present?
+  end
+
+  # `content_attributes` is a single JSON column, so writing any of its store accessors from a stale
+  # object rewrites the whole hash and drops flags another request set in the meantime — e.g. `deleted`,
+  # written by the DELETE endpoint while an outgoing message was still in flight on the provider.
+  # Reloads the row under FOR UPDATE before writing, which also serializes with those concurrent writers.
+  def update_under_lock!(attributes)
+    # `lock!` refuses to run on a record with unsaved changes. Flush what the caller left dirty — a
+    # plain `update!` would have written it too — but never the stale `content_attributes` hash, since
+    # writing it back is the very thing this method exists to prevent.
+    restore_attributes(['content_attributes']) if content_attributes_changed?
+    save! if changed?
+    with_lock { update!(attributes) }
+  end
+
   def valid_first_reply?
     return false unless human_response? && !private?
     return false if reaction?
@@ -313,6 +349,15 @@ class Message < ApplicationRecord
     return "[Voice Message] #{audio_transcription}" if audio_transcription.present?
 
     '[Attachment]' if attachments.any?
+  end
+
+  # An edit typed by an agent is written before the channel has taken it (`MessagesController#edit_content`
+  # writes, then asks), and written back when the channel refuses. Neither of those is an edit anybody
+  # made: the contact still has the body they always had. The caller that writes optimistically sets this
+  # and announces itself once the channel has accepted, and the write-back is covered by the same flag,
+  # which would otherwise announce a second time on a rollback that restores an already edited body.
+  def announce_edit
+    send_edited_event if edited_in_place?
   end
 
   private
@@ -438,6 +483,28 @@ class Message < ApplicationRecord
     return if previous_changes.blank?
 
     send_update_event
+    send_edited_event if edited_in_place? && !defer_edit_announcement
+  end
+
+  # The body changed and the row says an edit is what changed it. Both halves are load-bearing.
+  #
+  # `content` and not `content_attributes`: a delayed recovery landing on a row an edit already settled
+  # writes everything around the body and leaves the body alone (`MessageWriter#reconcile_in_place`),
+  # and that row still carries `is_edited` from the earlier edit, so the marker alone would announce an
+  # edit nobody made. And `is_edited` and not the content change alone, because the send failure of an
+  # edit writes the original body back with the marker off (`MessagesController#edit_content`): that is
+  # an undo, and announcing it would run the rules on a body the contact never saw.
+  #
+  # Nothing here has to deduplicate a redelivery. The providers resend events, and an edit applied a
+  # second time writes the same body: Rails sees no change, `previous_changes` comes back empty and this
+  # callback returns above. Measured, not assumed.
+  def edited_in_place?
+    previous_changes.key?('content') && is_edited
+  end
+
+  def send_edited_event
+    Rails.configuration.dispatcher.dispatch(MESSAGE_EDITED, Time.zone.now, message: self, performed_by: Current.executed_by,
+                                                                           previous_changes: previous_changes)
   end
 
   def send_reply
@@ -500,6 +567,8 @@ class Message < ApplicationRecord
   end
 
   def reindex_for_search
+    return unless respond_to?(:reindex)
+
     reindex(mode: :async)
   end
 end

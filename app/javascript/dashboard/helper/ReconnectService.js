@@ -4,7 +4,6 @@ import { differenceInSeconds } from 'date-fns';
 import {
   isAConversationRoute,
   isAInboxViewRoute,
-  isNotificationRoute,
 } from 'dashboard/helper/routeHelpers';
 
 const MAX_DISCONNECT_SECONDS = 10800;
@@ -60,13 +59,38 @@ class ReconnectService {
     await this.store.dispatch('updateChatListFilters', {
       updatedWithin: null,
     });
+    await this.reconcileConversationTab();
   };
 
+  // The fetch above asks for one tab, so a conversation that LEFT that tab while the socket was
+  // down is not in the answer, and the merge that applies it only ever adds or replaces. The stale
+  // copy stays on the list.
+  //
+  // The list watcher normally catches that, but only when the list ends up longer than the tab's
+  // count, which needs the whole tab to fit in what the agent has loaded. On a tab of several
+  // pages the residue hides inside the count and nothing on screen contradicts anything, so the
+  // one moment we know events were missed is the moment to ask outright.
+  reconcileConversationTab = async () => {
+    await this.store.dispatch(
+      'reconcileConversationTab',
+      this.store.getters.getChatListFilters
+    );
+  };
+
+  // The sort travels with the refetch, and it has to: page 1 of oldest-first and page 1 of
+  // newest-first are different conversations entirely, so refetching without it merges a
+  // page the agent is not looking at and leaves the visible ones stale -- the exact staleness
+  // this reconnect exists to clear.
   fetchFilteredOrSavedConversations = async queryData => {
-    await this.store.dispatch('fetchFilteredConversations', {
-      queryData,
-      page: 1,
-    });
+    try {
+      await this.store.dispatch('fetchFilteredConversations', {
+        queryData,
+        page: 1,
+        sortBy: this.store.getters.getChatSortFilter,
+      });
+    } catch (error) {
+      // Ignore error, reconnect flow should continue
+    }
   };
 
   fetchConversationsOnReconnect = async () => {
@@ -118,8 +142,6 @@ class ReconnectService {
       await this.fetchNotificationsOnReconnect(
         this.store.getters['notifications/getNotificationFilters']
       );
-    } else if (isNotificationRoute(currentRoute)) {
-      await this.fetchNotificationsOnReconnect();
     }
   };
 
@@ -141,6 +163,8 @@ class ReconnectService {
   onReconnect = async () => {
     await this.handleRouteSpecificFetch();
     await this.revalidateCaches();
+    // Pin events that fired while the socket was down are lost, so the map is rebuilt from the server.
+    await this.store.dispatch('conversationPins/fetch');
     emitter.emit(BUS_EVENTS.WEBSOCKET_RECONNECT_COMPLETED);
   };
 }

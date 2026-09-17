@@ -2,10 +2,10 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController #
   include Api::V1::InboxesHelper
   before_action :fetch_inbox, except: [:index, :create]
   before_action :fetch_agent_bot, only: [:set_agent_bot]
-  before_action :validate_limit, only: [:create]
   # we are already handling the authorization in fetch inbox
   # rubocop:disable Rails/LexicallyScopedActionFilter -- health is defined in WhatsappHealthManagement concern
-  before_action :check_authorization, except: [:show, :health, :setup_channel_provider]
+  before_action :check_authorization,
+                except: [:show, :health, :setup_channel_provider, :import_whatsapp_session, :request_pairing_code]
   before_action :validate_whatsapp_cloud_channel, only: [:health]
   # rubocop:enable Rails/LexicallyScopedActionFilter
   include Api::V1::Accounts::Concerns::WhatsappHealthManagement
@@ -48,11 +48,20 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController #
   end
 
   def update
-    inbox_params = permitted_params.except(:channel, :csat_config)
-    inbox_params[:csat_config] = format_csat_config(permitted_params[:csat_config]) if permitted_params[:csat_config].present?
-    @inbox.update!(inbox_params)
-    update_inbox_working_hours
-    update_channel if channel_update_required?
+    continue_update = false
+
+    ActiveRecord::Base.transaction do
+      continue_update = update_branded_email_layout
+      raise ActiveRecord::Rollback unless continue_update
+
+      inbox_params = permitted_params.except(:channel, :csat_config)
+      inbox_params[:csat_config] = format_csat_config(permitted_params[:csat_config]) if permitted_params[:csat_config].present?
+      @inbox.update!(inbox_params)
+      update_inbox_working_hours
+      update_channel if channel_update_required?
+    end
+
+    return unless continue_update
   end
 
   def agent_bot
@@ -85,6 +94,52 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController #
 
     channel.setup_channel_provider
     head :ok
+  rescue Whatsapp::Session::Errors::Error => e
+    render_session_error(e)
+  end
+
+  # The other way into the same pairing, for an operator who cannot scan the QR.
+  # Authorized exactly like setup_channel_provider, and for the same reason: both link a
+  # WhatsApp account to an inbox this agent is already assigned to.
+  #
+  # No phone in the request. The number is the inbox's own, because pairing links
+  # whatever phone the code is typed on and the layer quarantines a session whose account
+  # is not the inbox's.
+  def request_pairing_code
+    channel = @inbox.channel
+
+    unless channel.respond_to?(:request_pairing_code)
+      render json: { error: 'Channel does not support pairing by code' }, status: :unprocessable_entity and return
+    end
+
+    channel.request_pairing_code
+    head :ok
+  rescue Whatsapp::Session::Errors::Error => e
+    render_session_error(e)
+  end
+
+  # Hot-loads a WhatsApp Web session extracted by the browser extension into a
+  # disconnected Baileys inbox. Authorized like setup_channel_provider (any agent
+  # assigned to the inbox, via fetch_inbox -> show?), since connecting a number
+  # to an assigned inbox is the same privilege as scanning a QR for it.
+  def import_whatsapp_session
+    channel = @inbox.channel
+
+    unless channel.is_a?(Channel::Whatsapp) && channel.provider == 'baileys'
+      render json: { error: 'Session import is only supported for Baileys WhatsApp channels' },
+             status: :unprocessable_entity and return
+    end
+
+    session = import_session_params[:session].to_h
+    render json: { error: 'Session payload is required' }, status: :unprocessable_entity and return if session.blank?
+
+    channel.import_session(
+      session: session,
+      candidate_index: import_session_params[:candidate_index].to_i
+    )
+    head :ok
+  rescue Whatsapp::Session::Errors::ProviderUnavailable
+    render json: { error: 'WhatsApp provider is currently unavailable. Please try again.' }, status: :service_unavailable
   end
 
   def disconnect_channel_provider
@@ -95,9 +150,13 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController #
     end
 
     channel.disconnect_channel_provider
-    head :ok
-  ensure
     channel.update_provider_connection!(connection: 'close') if channel.respond_to?(:update_provider_connection!)
+    head :ok
+  rescue Whatsapp::Session::Errors::Error => e
+    # Marked closed on success only. A session the provider refused to end is still open,
+    # and recording it as closed is how an operator ends up with a connected number, a
+    # dashboard that says otherwise, and no reason to try again.
+    render_session_error(e)
   end
 
   def convert_provider
@@ -143,9 +202,48 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController #
 
   private
 
+  # The session layer's errors are answers, not crashes: a token typed wrong, an instance
+  # that is down, a provider that is rate limiting, a connect refused rather than
+  # attempted because the number is quarantined on a provider that cannot unpair. Both
+  # actions above are called straight from the pairing UI, which shows what comes back, so
+  # a 500 is a blank wall where a sentence belongs.
+  #
+  # Unauthorized and InvalidConfig are the operator's to fix and say so with a 422, even
+  # though they sit under ProviderUnavailable; retrying them changes nothing.
+  def render_session_error(error)
+    operator_fixable = error.is_a?(Whatsapp::Session::Errors::Unauthorized) ||
+                       error.is_a?(Whatsapp::Session::Errors::InvalidConfig)
+    status = if error.is_a?(Whatsapp::Session::Errors::RateLimited)
+               :too_many_requests
+             elsif error.is_a?(Whatsapp::Session::Errors::ProviderUnavailable) && !operator_fixable
+               :service_unavailable
+             else
+               :unprocessable_entity
+             end
+
+    render json: { error: error.message, code: error.class::CODE }, status: status
+  end
+
   def fetch_inbox
     @inbox = Current.account.inboxes.find(params[:id])
     authorize @inbox, :show?
+  end
+
+  # The session is opaque credentials forwarded verbatim to the Baileys API,
+  # which validates its schema. We still permit an explicit shape (rather than
+  # permit!) so nothing unexpected is forwarded. camelCase keys match the
+  # extractor's output.
+  def import_session_params
+    params.permit(
+      :candidate_index,
+      session: [
+        :registrationId, :advSecretKey, :id, :lid, :platform, :pushName, :routingInfo,
+        { noiseCandidates: %i[private public] },
+        { identityKey: %i[private public] },
+        { account: %i[details accountSignatureKey accountSignature deviceSignature] },
+        { signedPreKey: %i[keyId private public signature] }
+      ]
+    )
   end
 
   def fetch_agent_bot
@@ -187,8 +285,8 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController #
   end
 
   def reauthorize_and_update_channel(channel_attributes)
-    @inbox.channel.reauthorized! if @inbox.channel.respond_to?(:reauthorized!)
     @inbox.channel.update!(permitted_params(channel_attributes)[:channel])
+    @inbox.channel.reauthorized! if @inbox.channel.respond_to?(:reauthorized!)
   end
 
   def update_channel_feature_flags
@@ -218,10 +316,38 @@ class Api::V1::Accounts::InboxesController < Api::V1::Accounts::BaseController #
     formatted['template'] = config['template'] if config['template'].present?
   end
 
+  def update_branded_email_layout
+    return true unless params.key?(:branded_email_layout)
+
+    branded_email_layout = normalized_branded_email_layout
+
+    unless Current.account.feature_enabled?(:branded_email_templates)
+      return true if branded_email_layout.blank?
+
+      render_could_not_create_error('Branded email templates feature is not enabled')
+      return false
+    end
+
+    unless @inbox.email?
+      return true if branded_email_layout.blank?
+
+      render_could_not_create_error('Branded email layout is only supported for email inboxes')
+      return false
+    end
+
+    @inbox.update_branded_email_layout!(branded_email_layout)
+    true
+  rescue ActiveRecord::RecordInvalid => e
+    render_could_not_create_error(e.record.errors.full_messages.join(', '))
+    false
+  end
+
+  def normalized_branded_email_layout = params[:branded_email_layout] == 'null' ? nil : params[:branded_email_layout]
+
   def inbox_attributes
     [:name, :avatar, :greeting_enabled, :greeting_message, :enable_email_collect, :csat_survey_enabled,
      :enable_auto_assignment, :working_hours_enabled, :out_of_office_message, :timezone, :allow_messages_after_resolved,
-     :lock_to_single_conversation, :portal_id, :sender_name_type, :business_name,
+     :lock_to_single_conversation, :prevent_assignment_takeover, :portal_id, :sender_name_type, :business_name,
      { csat_config: [:display_type, :message, :button_text, :language,
                      { survey_rules: [:operator, { values: [] }],
                        template: [:name, :template_id, :friendly_name, :content_sid, :approval_sid,

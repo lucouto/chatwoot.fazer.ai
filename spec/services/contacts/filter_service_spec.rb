@@ -408,6 +408,57 @@ describe Contacts::FilterService do
         expect(result[:contacts].pluck(:id)).to include(el_contact.id)
       end
 
+      it 'filters contacts where the custom attribute is present' do
+        params[:payload] = [
+          {
+            attribute_key: 'customer_type',
+            filter_operator: 'is_present',
+            values: [],
+            query_operator: nil
+          }.with_indifferent_access
+        ]
+
+        result = filter_service.new(account, first_user, params).perform
+
+        expect(result[:contacts].pluck(:id)).to contain_exactly(el_contact.id, cs_contact.id)
+      end
+
+      it 'filters contacts where the custom attribute is not present' do
+        params[:payload] = [
+          {
+            attribute_key: 'customer_type',
+            filter_operator: 'is_not_present',
+            values: [],
+            query_operator: nil
+          }.with_indifferent_access
+        ]
+
+        result = filter_service.new(account, first_user, params).perform
+
+        expect(result[:contacts].pluck(:id)).to contain_exactly(en_contact.id)
+      end
+
+      it 'keeps the null check scoped when not_equal_to is not the last condition' do
+        params[:payload] = [
+          {
+            attribute_key: 'customer_type',
+            filter_operator: 'not_equal_to',
+            values: ['platinum'],
+            query_operator: 'AND'
+          }.with_indifferent_access,
+          {
+            attribute_key: 'contact_additional_information',
+            filter_operator: 'equal_to',
+            values: ['test custom data'],
+            query_operator: nil
+          }.with_indifferent_access
+        ]
+
+        result = filter_service.new(account, first_user, params).perform
+
+        expect(result[:contacts].pluck(:id)).to contain_exactly(en_contact.id)
+      end
+
       it 'binds custom date comparison values as dates' do
         date_value = '2024-01-01'
         params[:payload] = [
@@ -458,6 +509,52 @@ describe Contacts::FilterService do
         result = filter_service.new(account, first_user, params).perform
 
         expect(result[:contacts].pluck(:id)).to eq([cs_contact.id])
+      end
+
+      it 'filters custom date attributes by days before' do
+        cs_contact.update!(custom_attributes: cs_contact.custom_attributes.merge('signed_in_at' => (Time.zone.today - 4.days).to_s))
+        el_contact.update!(custom_attributes: el_contact.custom_attributes.merge('signed_in_at' => (Time.zone.today - 2.days).to_s))
+        params[:payload] = [
+          {
+            attribute_key: 'signed_in_at',
+            filter_operator: 'days_before',
+            values: [3],
+            query_operator: nil
+          }.with_indifferent_access
+        ]
+
+        result = filter_service.new(account, first_user, params).perform
+
+        expect(result[:contacts].pluck(:id)).to include(cs_contact.id)
+        expect(result[:contacts].pluck(:id)).not_to include(el_contact.id)
+      end
+
+      it 'rejects blank custom numeric values' do
+        params[:payload] = [
+          {
+            attribute_key: 'lifetime_value',
+            values: [''],
+            query_operator: nil
+          }.with_indifferent_access
+        ]
+
+        expect { filter_service.new(account, first_user, params).perform }.to raise_error(CustomExceptions::CustomFilter::InvalidValue)
+      end
+
+      it 'rejects non-finite custom numeric values' do
+        %w[Infinity NaN].each do |value|
+          params[:payload] = [
+            {
+              attribute_key: 'lifetime_value',
+              filter_operator: 'is_greater_than',
+              values: [value],
+              query_operator: nil
+            }.with_indifferent_access
+          ]
+
+          expect { filter_service.new(account, first_user, params).perform }
+            .to raise_error(CustomExceptions::CustomFilter::InvalidValue)
+        end
       end
 
       it 'rejects invalid custom date comparison values' do

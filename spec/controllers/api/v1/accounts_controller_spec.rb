@@ -198,6 +198,32 @@ RSpec.describe 'Accounts API', type: :request do
         expect(response.body).to include(account.support_email)
         expect(response.body).to include(account.locale)
       end
+
+      it 'exposes the latest chatwoot version' do
+        Redis::Alfred.set(Redis::Alfred::LATEST_CHATWOOT_VERSION, '4.16.1')
+
+        get "/api/v1/accounts/#{account.id}",
+            headers: admin.create_new_auth_token,
+            as: :json
+
+        expect(response.parsed_body['latest_chatwoot_version']).to eq('4.16.1')
+      end
+    end
+
+    context 'when API and webhook access is disabled for the account' do
+      it 'returns forbidden for API token authentication' do
+        account_scope = double
+        allow(account_scope).to receive(:find).with(account.id.to_s).and_return(account)
+        allow_any_instance_of(User).to receive(:accounts).and_return(account_scope) # rubocop:disable RSpec/AnyInstance
+        allow(account).to receive(:api_and_webhooks_enabled?).and_return(false)
+
+        get "/api/v1/accounts/#{account.id}",
+            headers: { api_access_token: admin.access_token.token },
+            as: :json
+
+        expect(response).to have_http_status(:forbidden)
+        expect(response.parsed_body['error']).to eq('API access is not enabled for this account')
+      end
     end
   end
 
@@ -213,7 +239,7 @@ RSpec.describe 'Accounts API', type: :request do
           as: :json
 
       expect(response).to have_http_status(:success)
-      expect(response.parsed_body['cache_keys'].keys).to match_array(%w[label inbox team])
+      expect(response.parsed_body['cache_keys'].keys).to match_array(%w[label inbox team canned_response])
     end
 
     it 'sets the appropriate cache headers' do
@@ -224,6 +250,47 @@ RSpec.describe 'Accounts API', type: :request do
       expect(response.headers['Cache-Control']).to include('max-age=10')
       expect(response.headers['Cache-Control']).to include('private')
       expect(response.headers['Cache-Control']).to include('stale-while-revalidate=300')
+    end
+
+    context 'when API and webhook access is disabled for the account' do
+      it 'returns forbidden for API token authentication' do
+        account_scope = double
+        allow(account_scope).to receive(:find).with(account.id.to_s).and_return(account)
+        allow_any_instance_of(User).to receive(:accounts).and_return(account_scope) # rubocop:disable RSpec/AnyInstance
+        allow(account).to receive(:api_and_webhooks_enabled?).and_return(false)
+
+        get "/api/v1/accounts/#{account.id}/cache_keys",
+            headers: { api_access_token: admin.access_token.token },
+            as: :json
+
+        expect(response).to have_http_status(:forbidden)
+      end
+    end
+  end
+
+  describe 'DELETE /api/v1/accounts/{account.id}/brand_logo_email' do
+    let(:account) { create(:account) }
+    let(:agent) { create(:user, account: account, role: :agent) }
+    let(:admin) { create(:user, account: account, role: :administrator) }
+
+    before do
+      account.brand_logo_email.attach(
+        io: Rails.root.join('spec/assets/avatar.png').open, filename: 'avatar.png', content_type: 'image/png'
+      )
+    end
+
+    it 'removes the logo for an administrator' do
+      delete "/api/v1/accounts/#{account.id}/brand_logo_email", headers: admin.create_new_auth_token
+
+      expect(response).to have_http_status(:success)
+      expect(account.reload.brand_logo_email).not_to be_attached
+    end
+
+    it 'refuses an agent' do
+      delete "/api/v1/accounts/#{account.id}/brand_logo_email", headers: agent.create_new_auth_token
+
+      expect(response).to have_http_status(:unauthorized)
+      expect(account.reload.brand_logo_email).to be_attached
     end
   end
 
@@ -292,6 +359,48 @@ RSpec.describe 'Accounts API', type: :request do
         end
       end
 
+      it 'stores the email brand fields' do
+        patch "/api/v1/accounts/#{account.id}",
+              params: { brand_name: 'Guichê Web', brand_url: 'https://www.guicheweb.com.br', brand_color: '#11D135' },
+              headers: admin.create_new_auth_token,
+              as: :json
+
+        expect(response).to have_http_status(:success)
+        expect(account.reload.brand_name).to eq('Guichê Web')
+        expect(account.reload.brand_url).to eq('https://www.guicheweb.com.br')
+        expect(account.reload.brand_color).to eq('#11D135')
+      end
+
+      it 'rejects a brand colour that is not a hex value' do
+        patch "/api/v1/accounts/#{account.id}",
+              params: { brand_color: 'rebeccapurple' },
+              headers: admin.create_new_auth_token,
+              as: :json
+
+        expect(response).to have_http_status(:unprocessable_entity)
+        expect(account.reload.brand_color).to be_nil
+      end
+
+      it 'attaches an email logo' do
+        patch "/api/v1/accounts/#{account.id}",
+              params: { brand_logo_email: fixture_file_upload(Rails.root.join('spec/assets/avatar.png'), 'image/png') },
+              headers: admin.create_new_auth_token
+
+        expect(response).to have_http_status(:success)
+        expect(account.reload.brand_logo_email).to be_attached
+      end
+
+      # SVG renders in the dashboard and in no mail client, so accepting it here would put a
+      # broken image at the top of every email the account sends.
+      it 'refuses a logo in a format email cannot render' do
+        patch "/api/v1/accounts/#{account.id}",
+              params: { brand_logo_email: fixture_file_upload(Rails.root.join('spec/assets/sample.pdf'), 'application/pdf') },
+              headers: admin.create_new_auth_token
+
+        expect(response).to have_http_status(:unprocessable_entity)
+        expect(account.reload.brand_logo_email).not_to be_attached
+      end
+
       it 'updates onboarding step to invite_team if onboarding step is present in account custom attributes' do
         account.update!(custom_attributes: { onboarding_step: 'account_update' })
         patch "/api/v1/accounts/#{account.id}",
@@ -324,6 +433,24 @@ RSpec.describe 'Accounts API', type: :request do
         expect(json_response['message']).to eq('Name is too long (maximum is 255 characters)')
       end
     end
+
+    context 'when API and webhook access is disabled for the account' do
+      it 'returns forbidden without modifying the account for API token authentication' do
+        account_scope = double
+        allow(account_scope).to receive(:find).with(account.id.to_s).and_return(account)
+        allow_any_instance_of(User).to receive(:accounts).and_return(account_scope) # rubocop:disable RSpec/AnyInstance
+        allow(account).to receive(:api_and_webhooks_enabled?).and_return(false)
+
+        expect do
+          patch "/api/v1/accounts/#{account.id}",
+                params: { name: 'Updated through API' },
+                headers: { api_access_token: admin.access_token.token },
+                as: :json
+        end.not_to(change { account.reload.name })
+
+        expect(response).to have_http_status(:forbidden)
+      end
+    end
   end
 
   describe 'POST /api/v1/accounts/{account.id}/update_active_at' do
@@ -347,6 +474,23 @@ RSpec.describe 'Accounts API', type: :request do
 
         expect(response).to have_http_status(:success)
         expect(agent.account_users.first.active_at).not_to be_nil
+      end
+    end
+
+    context 'when API and webhook access is disabled for the account' do
+      it 'returns forbidden without updating active_at for API token authentication' do
+        account_scope = double
+        allow(account_scope).to receive(:find).with(account.id.to_s).and_return(account)
+        allow_any_instance_of(User).to receive(:accounts).and_return(account_scope) # rubocop:disable RSpec/AnyInstance
+        allow(account).to receive(:api_and_webhooks_enabled?).and_return(false)
+        account_user = agent.account_users.first
+
+        post "/api/v1/accounts/#{account.id}/update_active_at",
+             headers: { api_access_token: agent.access_token.token },
+             as: :json
+
+        expect(response).to have_http_status(:forbidden)
+        expect(account_user.reload.active_at).to be_nil
       end
     end
   end

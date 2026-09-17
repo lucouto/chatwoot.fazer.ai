@@ -2,6 +2,11 @@ module Redis::RedisKeys
   ## Inbox Keys
   # Array storing the ordered ids for agent round robin assignment
   ROUND_ROBIN_AGENTS = 'ROUND_ROBIN_AGENTS:%<inbox_id>d'.freeze
+  # Track recently deleted IMAP messages to prevent them from being synced again
+  IMAP_DELETED_MESSAGE = 'IMAP_DELETED_MESSAGE::%<inbox_id>d::%<message_id_digest>s'.freeze
+  # How far the mailbox has already been swept, by IMAP UID. A cache, not state:
+  # losing it costs one expensive sweep, never a message.
+  IMAP_UID_CURSOR = 'IMAP_UID_CURSOR::%<inbox_id>d'.freeze
 
   ## Conversation keys
   # Detect whether to send an email reply to the conversation
@@ -31,6 +36,23 @@ module Redis::RedisKeys
     'UNREAD_CONVERSATIONS::V1::ACCOUNT::%<account_id>d::TEAM::%<team_id>d::INBOX::%<inbox_id>d::UNASSIGNED'.freeze
   UNREAD_CONVERSATIONS_TEAM_INBOX_ASSIGNEE =
     'UNREAD_CONVERSATIONS::V1::ACCOUNT::%<account_id>d::TEAM::%<team_id>d::INBOX::%<inbox_id>d::ASSIGNEE::%<user_id>d'.freeze
+  UNREAD_CONVERSATIONS_V2_ACCOUNT_PREFIX = 'UNREAD_CONVERSATIONS::V2::ACCOUNT::%<account_id>d'.freeze
+  UNREAD_CONVERSATIONS_V2_USER_PREFIX = "#{UNREAD_CONVERSATIONS_V2_ACCOUNT_PREFIX}::USER::%<user_id>d".freeze
+  UNREAD_CONVERSATIONS_V2_FILTER_PREFIX = "#{UNREAD_CONVERSATIONS_V2_ACCOUNT_PREFIX}::FILTER::%<filter_id>d".freeze
+  UNREAD_CONVERSATIONS_V2_CONVERSATION_VERSION = "#{UNREAD_CONVERSATIONS_V2_ACCOUNT_PREFIX}::CONVERSATION_VERSION".freeze
+  UNREAD_CONVERSATIONS_V2_BUILT_IN_FILTER_VERSION = "#{UNREAD_CONVERSATIONS_V2_USER_PREFIX}::BUILT_IN_FILTER_VERSION".freeze
+  UNREAD_CONVERSATIONS_V2_BUILT_IN_FILTER_COUNTS = "#{UNREAD_CONVERSATIONS_V2_USER_PREFIX}::BUILT_IN_FILTER_COUNTS".freeze
+  UNREAD_CONVERSATIONS_V2_BUILT_IN_FILTER_BUILD_LOCK = "#{UNREAD_CONVERSATIONS_V2_USER_PREFIX}::BUILT_IN_FILTER_BUILD_LOCK".freeze
+  UNREAD_CONVERSATIONS_V2_BUILT_IN_FILTER_REFRESH_THROTTLE =
+    "#{UNREAD_CONVERSATIONS_V2_USER_PREFIX}::BUILT_IN_FILTER_REFRESH_THROTTLE".freeze
+  UNREAD_CONVERSATIONS_V2_FOLDER_INDEX_VERSION = "#{UNREAD_CONVERSATIONS_V2_USER_PREFIX}::FOLDER_INDEX_VERSION".freeze
+  UNREAD_CONVERSATIONS_V2_FOLDER_INDEX = "#{UNREAD_CONVERSATIONS_V2_USER_PREFIX}::FOLDER_INDEX".freeze
+  UNREAD_CONVERSATIONS_V2_FOLDER_INDEX_BUILD_LOCK = "#{UNREAD_CONVERSATIONS_V2_USER_PREFIX}::FOLDER_INDEX_BUILD_LOCK".freeze
+  UNREAD_CONVERSATIONS_V2_FOLDER_INDEX_REFRESH_THROTTLE = "#{UNREAD_CONVERSATIONS_V2_USER_PREFIX}::FOLDER_INDEX_REFRESH_THROTTLE".freeze
+  UNREAD_CONVERSATIONS_V2_FILTER_VERSION = "#{UNREAD_CONVERSATIONS_V2_FILTER_PREFIX}::VERSION".freeze
+  UNREAD_CONVERSATIONS_V2_FILTER_COUNT = "#{UNREAD_CONVERSATIONS_V2_FILTER_PREFIX}::COUNT".freeze
+  UNREAD_CONVERSATIONS_V2_FILTER_BUILD_LOCK = "#{UNREAD_CONVERSATIONS_V2_FILTER_PREFIX}::BUILD_LOCK".freeze
+  UNREAD_CONVERSATIONS_V2_FILTER_REFRESH_THROTTLE = "#{UNREAD_CONVERSATIONS_V2_FILTER_PREFIX}::REFRESH_THROTTLE".freeze
 
   ## User Keys
   # SSO Auth Tokens
@@ -56,6 +78,21 @@ module Redis::RedisKeys
   # Check if a message create with same source-id is in progress?
   MESSAGE_SOURCE_KEY = 'MESSAGE_SOURCE_KEY::%<id>s'.freeze
   OPENAI_CONVERSATION_KEY = 'OPEN_AI_CONVERSATION_KEY::V1::%<event_name>s::%<conversation_id>d::%<updated_at>d'.freeze
+  # Bridges a WhatsApp call `terminate` that overtook its `connect` so the later connect can finalize it.
+  WHATSAPP_CALL_TERMINATE_TOMBSTONE = 'WHATSAPP_CALL_TERMINATE_TOMBSTONE::%<call_id>s'.freeze
+  # The provider message ids this app has just acknowledged to WhatsApp, per conversation, so the
+  # provider's echo of that receipt is not read back as a device of this account opening the chat.
+  WHATSAPP_SELF_READ_RECEIPT = 'WHATSAPP_SELF_READ_RECEIPT::%<conversation_id>s::%<source_id>s'.freeze
+  # An automation rule that has already acted on one message, so the content arriving after the
+  # placeholder it was stored as does not run that rule a second time.
+  AUTOMATION_RULE_MESSAGE_RUN = 'AUTOMATION_RULE_MESSAGE_RUN::%<rule_id>d::%<message_id>d'.freeze
+  # The same record, for a rule that answers to edits. The body it was evaluated against is part of the
+  # key: two announcements of one body, which is what two edits committing before their jobs run leaves
+  # behind, are the same run; a body nobody has offered this rule yet is a new one.
+  AUTOMATION_RULE_MESSAGE_BODY_RUN = 'AUTOMATION_RULE_MESSAGE_RUN::%<rule_id>d::%<message_id>d::%<body>s'.freeze
+  # The arrival of a placeholder whose rules were evaluated with those claims written, which is what says
+  # a later recovery of that row may evaluate them again.
+  AUTOMATION_MESSAGE_ARRIVAL_TRACKED = 'AUTOMATION_MESSAGE_ARRIVAL_TRACKED::%<message_id>d'.freeze
 
   ## Sempahores / Locks
   # We don't want to process messages from the same sender concurrently to prevent creating double conversations
@@ -68,6 +105,7 @@ module Redis::RedisKeys
   WHATSAPP_MESSAGE_MUTEX = 'WHATSAPP_MESSAGE_CREATE_LOCK::%<inbox_id>s::%<sender_id>s'.freeze
   CRM_PROCESS_MUTEX = 'CRM_PROCESS_MUTEX::%<hook_id>s'.freeze
   CAPTAIN_DOCUMENT_SYNC_MUTEX = 'CAPTAIN_DOCUMENT_SYNC_LOCK::%<document_id>s'.freeze
+  CAPTAIN_CONVERSATION_FAQ_MUTEX = 'CAPTAIN_CONVERSATION_FAQ_LOCK::%<assistant_id>s::%<language>s'.freeze
 
   ## Auto Assignment Keys
   # Track conversation assignments to agents for rate limiting

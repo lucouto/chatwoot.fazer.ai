@@ -11,14 +11,16 @@ RSpec.describe Internal::ReconcilePlanConfigService do
 
       it 'disables the premium features for accounts' do
         account = create(:account)
-        account.enable_features!('disable_branding', 'audit_logs', 'captain_integration')
+        account.enable_features!('disable_branding', 'audit_logs', 'captain_integration', 'captain_integration_v2')
         account_with_captain = create(:account)
-        account_with_captain.enable_features!('captain_integration')
+        account_with_captain.enable_features!('captain_integration', 'captain_integration_v2')
         disable_branding_account = create(:account)
         disable_branding_account.enable_features!('disable_branding')
         service.perform
-        expect(account.reload.enabled_features.keys).not_to include('captain_integration', 'disable_branding', 'audit_logs')
-        expect(account_with_captain.reload.enabled_features.keys).not_to include('captain_integration')
+        expect(account.reload.enabled_features.keys).not_to include(
+          'captain_integration', 'captain_integration_v2', 'disable_branding', 'audit_logs'
+        )
+        expect(account_with_captain.reload.enabled_features.keys).not_to include('captain_integration', 'captain_integration_v2')
         expect(disable_branding_account.reload.enabled_features.keys).not_to include('disable_branding')
       end
 
@@ -41,6 +43,14 @@ RSpec.describe Internal::ReconcilePlanConfigService do
         expect(InstallationConfig.find_by(name: 'INSTALLATION_NAME').value).to eq('Chatwoot')
         expect(InstallationConfig.find_by(name: 'LOGO').value).to eq('/brand-assets/logo.svg')
       end
+
+      it 'resets the email branding, which reaches the customer the same way the dashboard logo does' do
+        create(:installation_config, name: 'LOGO_EMAIL', value: 'https://cdn.example.com/logo.png')
+        create(:installation_config, name: 'BRAND_COLOR', value: '#11D135')
+        service.perform
+        expect(InstallationConfig.find_by(name: 'LOGO_EMAIL').value).to eq('')
+        expect(InstallationConfig.find_by(name: 'BRAND_COLOR').value).to eq('#1f93ff')
+      end
     end
 
     context 'when pricing plan is not community' do
@@ -56,14 +66,16 @@ RSpec.describe Internal::ReconcilePlanConfigService do
 
       it 'does not disable the premium features for accounts' do
         account = create(:account)
-        account.enable_features!('disable_branding', 'audit_logs', 'captain_integration')
+        account.enable_features!('disable_branding', 'audit_logs', 'captain_integration', 'captain_integration_v2')
         account_with_captain = create(:account)
-        account_with_captain.enable_features!('captain_integration')
+        account_with_captain.enable_features!('captain_integration', 'captain_integration_v2')
         disable_branding_account = create(:account)
         disable_branding_account.enable_features!('disable_branding')
         service.perform
-        expect(account.reload.enabled_features.keys).to include('captain_integration', 'disable_branding', 'audit_logs')
-        expect(account_with_captain.reload.enabled_features.keys).to include('captain_integration')
+        expect(account.reload.enabled_features.keys).to include(
+          'captain_integration', 'captain_integration_v2', 'disable_branding', 'audit_logs'
+        )
+        expect(account_with_captain.reload.enabled_features.keys).to include('captain_integration', 'captain_integration_v2')
         expect(disable_branding_account.reload.enabled_features.keys).to include('disable_branding')
       end
 

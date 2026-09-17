@@ -4,7 +4,6 @@ import { differenceInSeconds } from 'date-fns';
 import {
   isAConversationRoute,
   isAInboxViewRoute,
-  isNotificationRoute,
 } from 'dashboard/helper/routeHelpers';
 import ReconnectService from 'dashboard/helper/ReconnectService';
 
@@ -23,7 +22,6 @@ vi.mock('date-fns', () => ({
 vi.mock('dashboard/helper/routeHelpers', () => ({
   isAConversationRoute: vi.fn(),
   isAInboxViewRoute: vi.fn(),
-  isNotificationRoute: vi.fn(),
 }));
 
 const storeMock = {
@@ -32,6 +30,7 @@ const storeMock = {
     getAppliedConversationFiltersQuery: [],
     'customViews/getActiveConversationFolder': { query: {} },
     'notifications/getNotificationFilters': {},
+    getChatListFilters: { assigneeType: 'unassigned', status: 'open' },
   },
 };
 
@@ -156,6 +155,19 @@ describe('ReconnectService', () => {
         updatedWithin: null,
       });
     });
+
+    // The fetch asks for one tab, so a conversation that left it while the socket was down is not
+    // in the answer and its stale copy survives the merge. A reconnect is the one moment we know
+    // events were missed, so the tab is reconciled outright rather than waiting for the list to
+    // outgrow its badge, which never happens on a tab of several pages.
+    it('should reconcile the current tab after refetching', async () => {
+      reconnectService.getSecondsSinceDisconnect = vi.fn().mockReturnValue(100);
+      await reconnectService.fetchConversations();
+      expect(storeMock.dispatch).toHaveBeenCalledWith(
+        'reconcileConversationTab',
+        storeMock.getters.getChatListFilters
+      );
+    });
   });
 
   describe('fetchFilteredOrSavedConversations', () => {
@@ -164,7 +176,20 @@ describe('ReconnectService', () => {
       await reconnectService.fetchFilteredOrSavedConversations(payload);
       expect(storeMock.dispatch).toHaveBeenCalledWith(
         'fetchFilteredConversations',
-        { queryData: payload, page: 1 }
+        { queryData: payload, page: 1, sortBy: undefined }
+      );
+    });
+
+    // Page 1 of oldest-first and page 1 of newest-first are different conversations, so a
+    // refetch without the sort merges a page the agent is not looking at and leaves the
+    // visible ones stale, which is what the reconnect exists to prevent.
+    it('should carry the selected sort order', async () => {
+      storeMock.getters.getChatSortFilter = 'last_activity_at_asc';
+      const payload = { test: 'data' };
+      await reconnectService.fetchFilteredOrSavedConversations(payload);
+      expect(storeMock.dispatch).toHaveBeenCalledWith(
+        'fetchFilteredConversations',
+        { queryData: payload, page: 1, sortBy: 'last_activity_at_asc' }
       );
     });
   });
@@ -292,13 +317,6 @@ describe('ReconnectService', () => {
 
     it('should fetch notifications if current route is an inbox view route', async () => {
       isAInboxViewRoute.mockReturnValue(true);
-      const spy = vi.spyOn(reconnectService, 'fetchNotificationsOnReconnect');
-      await reconnectService.handleRouteSpecificFetch();
-      expect(spy).toHaveBeenCalled();
-    });
-
-    it('should fetch notifications if current route is a notification route', async () => {
-      isNotificationRoute.mockReturnValue(true);
       const spy = vi.spyOn(reconnectService, 'fetchNotificationsOnReconnect');
       await reconnectService.handleRouteSpecificFetch();
       expect(spy).toHaveBeenCalled();

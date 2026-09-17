@@ -21,6 +21,18 @@ export const AUTOMATIONS = {
         filterOperators: OPERATOR_TYPES_1,
       },
       {
+        key: 'sender_id',
+        name: 'SENDER',
+        inputType: 'search_select',
+        filterOperators: OPERATOR_TYPES_1,
+      },
+      {
+        key: 'sender_type',
+        name: 'SENDER_TYPE',
+        inputType: 'search_select',
+        filterOperators: OPERATOR_TYPES_1,
+      },
+      {
         key: 'content',
         name: 'MESSAGE_CONTAINS',
         inputType: 'comma_separated_plain_text',
@@ -706,6 +718,16 @@ export const AUTOMATIONS = {
   },
 };
 
+// An edit asks the same thing about the same subject as a creation does -- one message, its body, its
+// sender, its conversation -- so the trigger offers exactly the same conditions and the same actions.
+//
+// One object under two names, not a copy, so the two cannot drift apart in a later edit of one of
+// them. `structuredClone` preserves that identity (measured), which is why the pass in
+// `useAutomation` that appends the account's custom attributes reaches this trigger without naming
+// it: the array it edits is the same array. A copy here would silently cost the new trigger its
+// custom attributes. #648
+AUTOMATIONS.message_edited = AUTOMATIONS.message_created;
+
 export const AUTOMATION_RULE_EVENTS = [
   {
     key: 'conversation_created',
@@ -722,6 +744,10 @@ export const AUTOMATION_RULE_EVENTS = [
   {
     key: 'message_created',
     value: 'MESSAGE_CREATED',
+  },
+  {
+    key: 'message_edited',
+    value: 'MESSAGE_EDITED',
   },
   {
     key: 'conversation_opened',
@@ -834,3 +860,26 @@ export const AUTOMATION_ACTION_TYPES = [
 
 // Default delay for scheduled messages (24 hours in minutes)
 export const DEFAULT_SCHEDULED_MESSAGE_DELAY_MINUTES = 24 * 60;
+export const DEFAULT_DELAY_MINUTES = 240; // 4 hours
+export const MIN_DELAY_MINUTES = 10;
+export const MAX_DELAY_MINUTES = 43200; // 30 days
+export const DEFAULT_TRIGGER_STATUS = 'pending';
+
+// A delayed rule is expressed as one meaningful trigger instead of a raw event + conditions. Each
+// trigger maps to the automation's event_name plus a preset condition: message_type for the two
+// unresponsive cases (reply-chase / awaiting-agent), or a chosen status for conversation_updated.
+export const DELAYED_TRIGGERS = [
+  { key: 'conversation_status', eventName: 'conversation_updated' },
+  {
+    key: 'customer_unresponsive',
+    eventName: 'message_created',
+    messageType: 'outgoing',
+  },
+  {
+    key: 'agent_unresponsive',
+    eventName: 'message_created',
+    messageType: 'incoming',
+  },
+];
+
+export const DEFAULT_TRIGGER = DELAYED_TRIGGERS[0].key;

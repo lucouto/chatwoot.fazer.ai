@@ -179,6 +179,62 @@
               "type": "integer",
               "default": 1
             }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Filter entries by the name or email of the user who performed the action",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "types",
+            "in": "query",
+            "description": "Filter entries by the type of the audited record",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "example": "Inbox"
+              }
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Only return entries created at or after this unix timestamp",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "example": 1755388800
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "description": "Only return entries created at or before this unix timestamp",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "example": 1755993599
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Order of the entries by creation time",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "desc",
+                "asc"
+              ],
+              "default": "desc"
+            }
           }
         ],
         "responses": {
@@ -1980,6 +2036,15 @@
             "type": "number"
           },
           "description": "ID of the contact"
+        },
+        {
+          "name": "inbox_id",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "number"
+          },
+          "description": "Which inbox the action is performed as. A group contact is account-scoped, so the same WhatsApp group can belong to two inboxes of one account. Optional while a group is in a single inbox; required once it is in more than one, since there is otherwise no way to tell which number should act. An inbox the group is not in, or one the caller is not a member of, is refused. Accepted in the request body as well as on the query string."
         }
       ],
       "post": {
@@ -3214,6 +3279,61 @@
         }
       }
     },
+    "/api/v1/accounts/{account_id}/conversations/pins": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/account_id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Conversations"
+        ],
+        "operationId": "list-pinned-conversations",
+        "summary": "List Pinned Conversations",
+        "description": "Lists the conversations the current agent pinned in this account",
+        "security": [
+          {
+            "userApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "conversation_id": {
+                        "type": "number",
+                        "description": "The display id of the pinned conversation"
+                      },
+                      "pinned_at": {
+                        "type": "number",
+                        "description": "Unix timestamp of when the conversation was pinned"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/accounts/{account_id}/conversations/filter": {
       "parameters": [
         {
@@ -3440,6 +3560,129 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conversation not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/{account_id}/conversations/{conversation_id}/pin": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/account_id"
+        },
+        {
+          "$ref": "#/components/parameters/conversation_id"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Conversations"
+        ],
+        "operationId": "pin-a-conversation",
+        "summary": "Pin Conversation",
+        "description": "Pins the conversation to the top of the current agent's conversation list. Pins are personal and limited to 5 per agent per account.",
+        "security": [
+          {
+            "userApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "conversation_id": {
+                      "type": "number",
+                      "description": "The display id of the pinned conversation"
+                    },
+                    "pinned_at": {
+                      "type": "number",
+                      "description": "Unix timestamp of when the conversation was pinned"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conversation not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Pin limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/{account_id}/conversations/{conversation_id}/unpin": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/account_id"
+        },
+        {
+          "$ref": "#/components/parameters/conversation_id"
+        }
+      ],
+      "delete": {
+        "tags": [
+          "Conversations"
+        ],
+        "operationId": "unpin-a-conversation",
+        "summary": "Unpin Conversation",
+        "description": "Removes the current agent's pin from the conversation",
+        "security": [
+          {
+            "userApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
           },
           "401": {
             "description": "Unauthorized",
@@ -3736,6 +3979,91 @@
         }
       }
     },
+    "/api/v1/accounts/{account_id}/conversations/{conversation_id}/read_receipt": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/account_id"
+        },
+        {
+          "$ref": "#/components/parameters/conversation_id"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Conversations"
+        ],
+        "operationId": "read-receipt-of-a-conversation",
+        "summary": "Send Read Receipt",
+        "description": "Tells the messaging provider that the contact's messages were read, and changes nothing else. On WhatsApp this is what turns the ticks blue on the contact's phone.\n\nUnlike Update Last Seen, this writes no read state in Chatwoot: the conversation keeps its unread badge for the agents, so a bot acknowledging a message it handled does not hand a human a thread that already looks read.\n\nAvailable to agent bots, which is the point: a bot is not the assignee a receipt normally depends on. A bot may only call it on a conversation whose inbox it serves.\n\nProviders with no read receipt of their own (email, API channels, and WhatsApp inboxes with `mark_as_read` switched off) accept the call and do nothing.",
+        "security": [
+          {
+            "userApiKey": []
+          },
+          {
+            "agentBotApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "message_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    },
+                    "maxItems": 50,
+                    "description": "The incoming messages to acknowledge, which a caller that processed a specific batch should name. Ids outside this conversation, and messages already acknowledged, are ignored. Omit it to acknowledge every incoming message that has no receipt yet, capped at the 50 most recent.",
+                    "example": [
+                      1234,
+                      1235
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Unauthorized, or a bot that does not serve this conversation's inbox",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conversation not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "More than 50 message ids were named",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/accounts/{account_id}/conversations/{conversation_id}/custom_attributes": {
       "parameters": [
         {
@@ -3774,6 +4102,11 @@
                       "order_id": "12345",
                       "previous_conversation": "67890"
                     }
+                  },
+                  "merge": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, only the keys sent in `custom_attributes` are updated and the remaining keys are kept intact. When false (default), the whole custom attributes hash is replaced. Use the destroy_custom_attributes endpoint to remove keys."
                   }
                 }
               }
@@ -3791,6 +4124,93 @@
                     "custom_attributes": {
                       "type": "object",
                       "description": "The custom attributes of the conversation"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conversation not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/{account_id}/conversations/{conversation_id}/destroy_custom_attributes": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/account_id"
+        },
+        {
+          "$ref": "#/components/parameters/conversation_id"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Conversations"
+        ],
+        "operationId": "destroy-custom-attributes-of-a-conversation",
+        "summary": "Destroy Custom Attributes",
+        "description": "Removes the given custom attribute keys from a conversation",
+        "security": [
+          {
+            "userApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "custom_attributes"
+                ],
+                "properties": {
+                  "custom_attributes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "The list of custom attribute keys to remove from the conversation",
+                    "example": [
+                      "order_id",
+                      "previous_conversation"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "custom_attributes": {
+                      "type": "object",
+                      "description": "The remaining custom attributes of the conversation"
                     }
                   }
                 }
@@ -4387,6 +4807,108 @@
         }
       }
     },
+    "/api/v1/accounts/{account_id}/branded_email_layout": {
+      "get": {
+        "tags": [
+          "Inboxes"
+        ],
+        "operationId": "getAccountBrandedEmailLayout",
+        "summary": "Get account branded email layout",
+        "security": [
+          {
+            "userApiKey": []
+          }
+        ],
+        "description": "Get the account-scoped Liquid HTML layout used as the fallback for branded email replies.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/account_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/branded_email_layout"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Inboxes"
+        ],
+        "operationId": "updateAccountBrandedEmailLayout",
+        "summary": "Update account branded email layout",
+        "security": [
+          {
+            "userApiKey": []
+          }
+        ],
+        "description": "Update or clear the account-scoped Liquid HTML layout used as the fallback for branded email replies.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/account_id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/account_branded_email_layout_payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/branded_email_layout"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/accounts/{account_id}/inboxes": {
       "get": {
         "tags": [
@@ -4902,6 +5424,109 @@
           },
           "403": {
             "description": "Access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/{account_id}/inboxes/{id}/message_templates": {
+      "get": {
+        "tags": [
+          "Inboxes"
+        ],
+        "operationId": "listWhatsappMessageTemplates",
+        "summary": "List WhatsApp message templates",
+        "security": [
+          {
+            "userApiKey": []
+          }
+        ],
+        "description": "List the cached message templates available for a native or Twilio WhatsApp inbox",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/account_id"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "type": "number"
+            },
+            "description": "ID of the native or Twilio WhatsApp inbox",
+            "required": true
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact template name to filter by",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "payload": {
+                      "type": "array",
+                      "description": "Native or Twilio WhatsApp message templates available for the inbox",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "last_sync_attempt_at": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "date-time",
+                          "description": "Time when template synchronization was last attempted"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Inbox not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bad_request_error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The inbox is not a WhatsApp inbox",
             "content": {
               "application/json": {
                 "schema": {
@@ -5750,7 +6375,7 @@
         ],
         "operationId": "create-a-new-message-in-a-conversation",
         "summary": "Create New Message",
-        "description": "Create a new message in the conversation.\n\nUse `application/json` for text messages and `multipart/form-data` when the\nmessage includes file attachments.\n\n### Multipart attachment request\n\nSend files with the `attachments[]` form field. `curl -F` sets the\n`multipart/form-data` content type and boundary automatically.\n\n```bash\ncurl -X POST \"https://app.chatwoot.com/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages\" \\\n  -H \"api_access_token: <your-api-token>\" \\\n  -F \"content=Here is the screenshot\" \\\n  -F \"message_type=outgoing\" \\\n  -F \"private=false\" \\\n  -F \"attachments[]=@/path/to/screenshot.png\"\n```\n\n## WhatsApp Template Messages\n\nFor WhatsApp channels, you can send structured template messages using the `template_params` field. \nTemplates must be pre-approved in WhatsApp Business Manager.\n\n### Example Templates\n\n**Text with Image Header:**\n```json\n{\n  \"content\": \"Hi your order 121212 is confirmed. Please wait for further updates\",\n  \"template_params\": {\n    \"name\": \"order_confirmation\",\n    \"category\": \"MARKETING\",\n    \"language\": \"en\",\n    \"processed_params\": {\n      \"body\": {\n        \"1\": \"121212\"\n      },\n      \"header\": {\n        \"media_url\": \"https://picsum.photos/200/300\",\n        \"media_type\": \"image\"\n      }\n    }\n  }\n}\n```\n\n**Text with Copy Code Button:**\n```json\n{\n  \"content\": \"Special offer! Get 30% off your next purchase. Use the code below\",\n  \"template_params\": {\n    \"name\": \"discount_coupon\",\n    \"category\": \"MARKETING\",\n    \"language\": \"en\",\n    \"processed_params\": {\n      \"body\": {\n        \"discount_percentage\": \"30\"\n      },\n      \"buttons\": [{\n        \"type\": \"copy_code\",\n        \"parameter\": \"SAVE20\"\n      }]\n    }\n  }\n}\n```\n",
+        "description": "Create a new message in the conversation.\n\nUse `application/json` for text messages and `multipart/form-data` when the\nmessage includes file attachments.\n\n### Multipart attachment request\n\nSend files with the `attachments[]` form field. `curl -F` sets the\n`multipart/form-data` content type and boundary automatically.\n\n```bash\ncurl -X POST \"https://app.chatwoot.com/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages\" \\\n  -H \"api_access_token: <your-api-token>\" \\\n  -F \"content=Here is the screenshot\" \\\n  -F \"message_type=outgoing\" \\\n  -F \"private=false\" \\\n  -F \"attachments[]=@/path/to/screenshot.png\"\n```\n\n## WhatsApp Template Messages\n\nFor WhatsApp channels, you can send structured template messages using the `template_params` field. \nTemplates must be pre-approved in WhatsApp Business Manager.\n\nBy default, `content` is treated as the already-rendered transcript text for\ncompatibility with existing API and mobile clients. To submit the original\ntemplate body instead, set `template_params.content_mode` to `raw_template`;\nChatwoot will substitute `processed_params.body` before saving the transcript.\n\n### Example Templates\n\n**Text with Image Header:**\n```json\n{\n  \"content\": \"Hi your order 121212 is confirmed. Please wait for further updates\",\n  \"template_params\": {\n    \"name\": \"order_confirmation\",\n    \"category\": \"MARKETING\",\n    \"language\": \"en\",\n    \"processed_params\": {\n      \"body\": {\n        \"1\": \"121212\"\n      },\n      \"header\": {\n        \"media_url\": \"https://picsum.photos/200/300\",\n        \"media_type\": \"image\"\n      }\n    }\n  }\n}\n```\n\n**Text with Copy Code Button:**\n```json\n{\n  \"content\": \"Special offer! Get 30% off your next purchase. Use the code below\",\n  \"template_params\": {\n    \"name\": \"discount_coupon\",\n    \"category\": \"MARKETING\",\n    \"language\": \"en\",\n    \"processed_params\": {\n      \"body\": {\n        \"discount_percentage\": \"30\"\n      },\n      \"buttons\": [{\n        \"type\": \"copy_code\",\n        \"parameter\": \"SAVE20\"\n      }]\n    }\n  }\n}\n```\n",
         "security": [
           {
             "userApiKey": []
@@ -11830,6 +12455,13 @@
             ],
             "description": "Business name associated with the inbox"
           },
+          "branded_email_layout": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Liquid HTML layout for branded email replies. Available to administrators for Email inbox show/update responses."
+          },
           "hmac_mandatory": {
             "type": "boolean",
             "description": "Whether HMAC verification is mandatory"
@@ -11872,6 +12504,19 @@
               "null"
             ],
             "description": "Provider of the channel"
+          }
+        }
+      },
+      "branded_email_layout": {
+        "type": "object",
+        "properties": {
+          "branded_email_layout": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Account-scoped Liquid HTML layout for branded email replies.",
+            "example": "<html><body>{{ content_for_layout }}</body></html>"
           }
         }
       },
@@ -15030,6 +15675,15 @@
                 "description": "Language code of the template (BCP 47 format)",
                 "example": "en_US"
               },
+              "content_mode": {
+                "type": "string",
+                "enum": [
+                  "raw_template",
+                  "rendered"
+                ],
+                "default": "rendered",
+                "description": "Format of the top-level `content` field. Existing clients may send rendered\ncontent or omit this field. Set this to `raw_template` only when `content`\ncontains the original template body placeholders.\n"
+              },
               "processed_params": {
                 "type": "object",
                 "description": "Processed template parameters organized by component type",
@@ -15441,6 +16095,15 @@
             "description": "Business name for outbound email replies.\n\nAvailable for: `Website` `Email`\n",
             "example": "My Business"
           },
+          "branded_email_layout": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 262144,
+            "description": "Liquid HTML layout for outbound email replies. Must include `{{ content_for_layout }}` and be 262,144 characters or shorter.\n\nAvailable for: `Email`\n",
+            "example": "<html><body>{{ content_for_layout }}</body></html>"
+          },
           "channel": {
             "anyOf": [
               {
@@ -15465,6 +16128,20 @@
                 "$ref": "#/components/schemas/inbox_update_sms_channel_payload"
               }
             ]
+          }
+        }
+      },
+      "account_branded_email_layout_payload": {
+        "type": "object",
+        "properties": {
+          "branded_email_layout": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 262144,
+            "description": "Account-scoped Liquid HTML layout for branded email replies. Maximum length is 262,144 characters. Blank or null removes the account override.",
+            "example": "<html><body>{{ content_for_layout }}</body></html>"
           }
         }
       },

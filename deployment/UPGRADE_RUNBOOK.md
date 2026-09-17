@@ -21,7 +21,7 @@
 | **Live PROD DB container** | `postgres-f8kkkgcsko4sogs88k8c80ok` (Coolify project `f8kkkgcsko4sogs88k8c80ok`) |
 | **STAGING DB container** | `postgres-vkg4sgcco4wg8os4sckws088` (separate Coolify project `vkg4...`) |
 | Compose files (repo) | `docker-compose.production-<ver>.yaml`, `docker-compose.staging-<ver>.yaml` |
-| Current prod version | **v4.14.2-fazer-ai.85-ee** (as of 2026-09-17) |
+| Current prod version | **v4.17.0-fazer-ai.115-ee** (cut over 2026-09-17 19:43 CEST) |
 | Current staging version | **v4.17.0-fazer-ai.115-ee** (as of 2026-09-17) |
 
 ### ⚠️ Branch from what PROD RUNS, not from `main`
@@ -226,6 +226,20 @@ Also confirm in-app: **Super Admin → Instance Status** (version, git SHA, edit
 migrations completed, Baileys version). **Trust this over the Coolify badge** (see §7).
 
 ---
+
+### Measured cutover cost (4.14.2 → 4.17.0, 2026-09-17)
+
+| | |
+|---|---|
+| Downtime (503 → 200) | **~110 s** |
+| Migrations | 160 → 214 (54), all inside the boot |
+| New dead Sidekiq jobs | **0** (the 18 in the set are from June 2026) |
+| WhatsApp | Baileys channel back to `connection: open` on its own |
+| Prod dump | 777 MB, ~2 min |
+
+Promote the **same image staging ran** — do not re-cut the tag for prod. Rebuilding ships
+an artifact nobody tested to fix a provenance question that inspecting the image already
+answers.
 
 ## 5. Back up prod DB BEFORE the prod deploy
 

@@ -223,6 +223,10 @@ describe('useAutomation', () => {
     automationTypes.conversation_updated = { conditions: [] };
     automationTypes.conversation_opened = { conditions: [] };
     automationTypes.conversation_resolved = { conditions: [] };
+    // AUTOMATIONS.message_edited is assigned after the object literal in
+    // constants.js, so it is easy to miss; without resetting it this assertion
+    // sees its untouched 15 conditions.
+    automationTypes.message_edited = { conditions: [] };
 
     automationHelper.generateCustomAttributeTypes.mockReturnValue([]);
     automationHelper.generateCustomAttributes.mockReturnValue([]);

@@ -24,3 +24,10 @@ ignore:
   # No Rails 7.1 patch for this Active Storage advisory; mitigated locally.
   # Remove once on Rails 7.2.3.1+.
   - CVE-2026-66066
+  # ruby_llm ReDoS. The advisory's only fix is '>= 2.0.0.rc1' — a release
+  # candidate, and unreachable anyway: ai-agents 0.12.0 requires
+  # ruby_llm (~> 1.14), so 2.x cannot resolve without replacing that gem too.
+  # ruby_llm is used only by Captain (enterprise/). Remove once upstream moves
+  # the Captain stack to ruby_llm 2.x.
+  - CVE-2026-67991
+  - GHSA-42r3-x6vx-x49x

@@ -45,6 +45,50 @@ jobs:
         run: |
           echo -en '\nENV CW_EDITION="ee"' >> docker/Dockerfile
 
+      # Guards the two ways a release has silently lost fork content:
+      #  - branching an upgrade off `main` when `main` is not what production runs
+      #    (that is how the Sidebar Kanban removal nearly went missing in Sept 2026), and
+      #  - an upstream merge quietly reverting a customization.
+      # Fail the build here rather than ship an image that looks fine and behaves wrong.
+      - name: Verify fork customizations and edition
+        run: |
+          fail=0
+          check() {  # check <description> <file> <grep-args...>
+            desc="$1"; file="$2"; shift 2
+            if grep -q "$@" "$file"; then
+              echo "OK   $desc"
+            else
+              echo "MISS $desc  ($file)"; fail=1
+            fi
+          }
+
+          check "OPERATOR_TYPES_7 is defined" \
+            app/javascript/dashboard/routes/dashboard/settings/automation/operators.js \
+            -- 'export const OPERATOR_TYPES_7'
+          check "text custom attributes map to OPERATOR_TYPES_7" \
+            app/javascript/dashboard/helper/automationHelper.js \
+            -- 'text: OPERATOR_TYPES_7'
+          check "custom attributes resolve in create mode too" \
+            app/javascript/dashboard/helper/automationHelper.js \
+            -- 'Check for custom attributes in both edit and create modes'
+
+          # Inverse check: upstream ships a native Kanban sidebar entry, this fork removes it.
+          if grep -qi kanban app/javascript/dashboard/components-next/sidebar/Sidebar.vue; then
+            echo "MISS native Kanban entry is back in Sidebar.vue"; fail=1
+          else
+            echo "OK   native Kanban entry stays removed"
+          fi
+
+          # ChatwootApp.enterprise? is `root.join('enterprise').exist?` - a CE build is one
+          # where enterprise/ was deleted. Assert the directory, not CW_EDITION.
+          if [ -d enterprise ]; then
+            echo "OK   enterprise/ present ($(find enterprise -type f | wc -l) files)"
+          else
+            echo "MISS enterprise/ is absent - this would build a CE image"; fail=1
+          fi
+
+          [ "$fail" -eq 0 ] || { echo "::error::fork customization check failed - refusing to publish"; exit 1; }
+
       - name: Set Docker Tags
         run: |
           SANITIZED_REF=$(echo "$GIT_REF" | sed 's/\//-/g')

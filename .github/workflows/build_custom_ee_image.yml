@@ -4,10 +4,13 @@ permissions:
   contents: read
   packages: write
 
+# NOTE: intentionally NOT triggered by tag pushes.
+# This workflow and publish_my_ee_docker.yml build the same image and push the SAME
+# ghcr tag. Each platform job pushes the tag directly, so when both ran on
+# v4.17.0-fazer-ai.115-ee the manifest flipped between amd64-only and 2-arch depending
+# on which job finished last. publish_my_ee_docker.yml is the one release path; this one
+# stays as a manual escape hatch.
 on:
-  push:
-    tags:
-      - 'v*-ee'
   workflow_dispatch:
     inputs:
       version_tag:

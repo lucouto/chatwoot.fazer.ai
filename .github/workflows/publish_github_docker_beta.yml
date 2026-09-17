@@ -4,9 +4,10 @@ permissions:
   contents: read
   packages: write
 
+# Pushes to ghcr.io/<this repo> and also moves the floating :latest / :latest-ee / :beta
+# tags. Cutting a GitHub Release here would therefore overwrite an image published by
+# publish_my_ee_docker.yml with a differently-built one. Manual only.
 on:
-  release:
-    types: [prereleased]
   workflow_dispatch:
 
 env:

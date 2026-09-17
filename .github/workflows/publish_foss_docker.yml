@@ -6,13 +6,9 @@
 
 name: Publish Chatwoot CE docker images
 
+# Upstream's Docker Hub publisher (DOCKER_REPO: chatwoot/chatwoot). In this fork it has
+# no credentials, so every tag push produced a red failure for nothing. Manual only.
 on:
-  push:
-    branches:
-      - develop
-      - master
-    tags:
-      - v*
   workflow_dispatch:
 
 env:

@@ -21,7 +21,22 @@
 | **Live PROD DB container** | `postgres-f8kkkgcsko4sogs88k8c80ok` (Coolify project `f8kkkgcsko4sogs88k8c80ok`) |
 | **STAGING DB container** | `postgres-vkg4sgcco4wg8os4sckws088` (separate Coolify project `vkg4...`) |
 | Compose files (repo) | `docker-compose.production-<ver>.yaml`, `docker-compose.staging-<ver>.yaml` |
-| Current prod version | **v4.14.2-fazer-ai.84-ee** (as of 2026-06-17) |
+| Current prod version | **v4.14.2-fazer-ai.85-ee** (as of 2026-09-17) |
+| Current staging version | **v4.17.0-fazer-ai.115-ee** (as of 2026-09-17) |
+
+### ⚠️ Branch from what PROD RUNS, not from `main`
+
+`main` is not necessarily production. In Sept 2026 prod was running
+`v4.14.2-fazer-ai.85-ee` = commit `6105d475a` (branch `docs/coolify-ghost-postgres`),
+which carries `fix(sidebar): remove native Kanban entry` — a commit `main` never got.
+Branching the upgrade from `main` would have silently reintroduced the native Kanban
+menu item.
+
+**Always resolve the base this way**, then branch from it:
+```bash
+ssh coolify-vm 'docker inspect rails-f8kkkgcsko4sogs88k8c80ok --format "{{.Config.Image}}"'
+git rev-parse <that-tag>^{commit}    # <- branch from THIS
+```
 
 **Why we build our own image** (not fazer-ai's stock): we keep customizations.
 As of v4.14.2 the only genuine in-image customization left is the **automation
@@ -54,18 +69,46 @@ git tag v<ver>
 git push origin upgrade-to-<ver> --tags
 ```
 
+### ⚠️ Two workflows race on the same tag — disable one
+
+`build_custom_ee_image.yml` ("Build Custom EE Image with Customizations") **also**
+triggers on `push: tags: v*-ee`, builds the same image and pushes the **same tag** as
+`publish_my_ee_docker.yml`. Both produce valid EE images, but each platform job of each
+workflow pushes the tag directly, so whichever finishes last wins and the tag content is
+**nondeterministic**. Observed on v4.17.0-fazer-ai.115-ee: the primary workflow published a
+correct 2-arch manifest at 16:42:46, the duplicate then clobbered it with an amd64-only
+manifest, and the tag only became 2-arch again when the duplicate's own merge job finished.
+
+Upstream's `publish_ee_docker.yml` / `publish_foss_docker.yml` also fire on the tag (they
+fail noisily, which is why §9 says to disable them).
+
+**Fix: make `build_custom_ee_image.yml` `workflow_dispatch`-only.** Until then, always
+re-inspect the manifest *after every workflow on the tag has finished*, not just the
+primary one.
+
 Verify the build before touching Coolify:
 ```bash
 gh run list --repo lucouto/chatwoot.fazer.ai --workflow=publish_my_ee_docker.yml --limit 3
 docker buildx imagetools inspect ghcr.io/lucouto/chatwoot.fazer.ai:v<ver>-ee
 ```
 Both `linux/amd64` and `linux/arm64` must resolve before proceeding.
+
+**Prove it is really the Enterprise image.** `ChatwootApp.enterprise?` is
+`root.join('enterprise').exist?` (`lib/chatwoot_app.rb`) — it does **not** read
+`CW_EDITION`. A CE image is made by *deleting* `enterprise/` (that `rm -rf` lives only in
+upstream's FOSS workflow); our workflow has no strip step, so EE is the default outcome.
+Check the artifact, not the intent:
+```bash
+IMG=ghcr.io/lucouto/chatwoot.fazer.ai:v<ver>-ee
+docker run --rm --entrypoint sh $IMG -c 'find /app/enterprise -type f | wc -l; echo $CW_EDITION; grep -m1 version: /app/config/app.yml'
+```
+Expect a few hundred files, `ee`, and the version you tagged.
 If the merge build fails on a transient `registry-1.docker.io context deadline exceeded`
 (Buildx bootstrap), just re-run: `gh run rerun <run-id> --failed`.
 
 ---
 
-## 2. ⚠️ ALWAYS migrate staging FIRST, incrementally
+## 2. ⚠️ ALWAYS rehearse the migration on prod data FIRST
 
 **This is the most important rule.** A **big-bang multi-version jump** (e.g. 4.10→4.14
 in one shot) runs *all* migrations at once with the *final* code loaded. Early data
@@ -78,9 +121,37 @@ We hit this live on prod: migration `20260112092041` (RemoveCountryCodeFromConve
 loaded `CustomFilter` with `enum :visibility`, but the `visibility` column is added by a
 *later* migration `20260510160215`.
 
-**Avoid it by migrating staging incrementally through intermediate versions.** Staging
-never hit the bug because it stepped through versions; prod jumped and broke.
-If you must big-bang, see the fix in §6.
+**Rehearse the exact prod jump on a throwaway DB before deploying anything.** This is
+cheaper than incremental version-stepping and it tests the path prod will actually take.
+Migrating staging incrementally does *not* test it — that is precisely why staging passed
+and prod broke in June 2026.
+
+```bash
+# on the Coolify host: prod dump -> disposable pg -> migrate with the NEW image.
+# No web, no sidekiq, no outbound: nothing can email or WhatsApp a real contact.
+docker network create migtest-net; docker volume create migtest-pgdata
+docker run -d --name migtest-pg --network migtest-net \
+  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=migtest -e POSTGRES_DB=chatwoot_production \
+  -v migtest-pgdata:/var/lib/postgresql/data pgvector/pgvector:pg16
+docker run -d --name migtest-redis --network migtest-net redis:alpine
+docker exec -i migtest-pg pg_restore -U postgres -d chatwoot_production \
+  --no-owner --no-acl --clean --if-exists < ~/chatwoot_prod_<date>.dump
+
+docker run --rm --network migtest-net \
+  -e RAILS_ENV=production -e POSTGRES_HOST=migtest-pg -e POSTGRES_PORT=5432 \
+  -e POSTGRES_USERNAME=postgres -e POSTGRES_PASSWORD=migtest \
+  -e POSTGRES_DATABASE=chatwoot_production -e REDIS_URL=redis://migtest-redis:6379 \
+  -e SECRET_KEY_BASE=$(head -c48 /dev/urandom | base64 | tr -d /+=) \
+  -v /opt/chatwoot-patches/config/initializers/99_fix_pricing_plan_quantity.rb:/app/config/initializers/99_fix_pricing_plan_quantity.rb:ro \
+  ghcr.io/lucouto/chatwoot.fazer.ai:v<ver>-ee bundle exec rails db:migrate
+
+# teardown
+docker rm -f migtest-pg migtest-redis; docker volume rm migtest-pgdata; docker network rm migtest-net
+```
+Pass = no `Undeclared attribute` / `PG::` / `rails aborted`, and `db:migrate:status` shows
+0 `down`. **Result on 2026-09-17 for 4.14.2 → 4.17.0** (160 applied → 214, 54 migrations,
+3 minor versions in one shot): clean, the §6 bug did **not** recur. If it ever does, §6 has
+the fix.
 
 ---
 
@@ -91,8 +162,28 @@ If you must big-bang, see the fix in §6.
    `99_fix_pricing_plan_quantity.rb` Enterprise-unlock patch (see §0). Remove any
    other historical patch mounts (`filter_service.rb`, `show.html.erb`, Azure
    `base_open_ai_service.rb` — that last one would *reintroduce* removed code).
-3. **Save** → Coolify pulls the image and redeploys. The `rails` service runs
-   `db:chatwoot_prepare` in its `post_start` hook, so migrations run automatically.
+3. **Save** → Coolify pulls the image and redeploys. `docker/entrypoints/rails.sh`
+   runs `db:chatwoot_prepare` before booting the server, so migrations run automatically
+   (the compose `post_start` hook is belt-and-braces).
+
+**Since 4.17 the worker compose MUST be updated — two lines, both mandatory:**
+```yaml
+  sidekiq:
+    entrypoint: docker/entrypoints/sidekiq.sh          # schema gate (also in the image ENTRYPOINT)
+    healthcheck:
+      test: ['CMD-SHELL', 'ps aux | grep [s]idekiq | grep -qv entrypoints']
+```
+The gate holds the worker until `db:abort_if_pending_migrations` passes, because a worker
+that boots one migration behind keeps that schema for the life of the process and only
+fails on writes that CREATE records — healthy container, empty queue, messages silently
+lost. While it waits, its argv still contains `sidekiq`, so the **old** healthcheck
+(`ps aux | grep [s]idekiq`) calls a stalled worker healthy. Both lines or neither.
+
+Updating a Coolify service's compose over the API needs the YAML **base64-encoded**:
+```bash
+PATCH $COOLIFY_API_URL/services/<uuid>   {"docker_compose_raw": "<base64>"}
+GET   $COOLIFY_API_URL/services/<uuid>/start
+```
 
 SMTP is env-var driven (Gmail, port 587 STARTTLS). Set in Coolify env vars, not compose:
 ```
@@ -151,9 +242,13 @@ Then restart rails + sidekiq in Coolify.
 
 ---
 
-## 7. Coolify "Degraded (unhealthy)" + ghost Postgres — IGNORE IT
+## 7. Coolify "Degraded (unhealthy)" + ghost Postgres — RESOLVED 2026-06-17
 
-The prod stack shows **two Postgres rows and a "Degraded" badge**. This is **cosmetic**.
+**Fixed:** the phantom `ServiceDatabase` record was deleted via its Coolify **Settings → Delete**
+(Coolify never auto-prunes orphaned records — issue #9591). Prod has read `running:healthy`
+since. Kept below because the symptom can recur after a stack rebuild.
+
+The prod stack showed **two Postgres rows and a "Degraded" badge**. That was **cosmetic**.
 - The deployed compose (`/data/coolify/services/f8kk.../docker-compose.yml`) has exactly
   ONE `postgres` service + ONE volume; `docker ps -a --filter ancestor=pgvector/pgvector:pg16`
   shows only the one live healthy container.

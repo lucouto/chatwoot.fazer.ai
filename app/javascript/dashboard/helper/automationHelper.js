@@ -7,7 +7,6 @@ import {
 } from 'dashboard/constants/automation';
 import {
   OPERATOR_TYPES_1,
-  OPERATOR_TYPES_3,
   OPERATOR_TYPES_4,
   OPERATOR_TYPES_7,
 } from 'dashboard/routes/dashboard/settings/automation/operators';
@@ -388,7 +387,7 @@ export const getOperators = (
   if (customAttribute) {
     return getOperatorTypes(customAttribute.attribute_display_type);
   }
-  
+
   // Fall back to standard automation types for non-custom attributes
   const type = getAutomationType(automationTypes, automation, key);
   return type?.filterOperators ?? [];

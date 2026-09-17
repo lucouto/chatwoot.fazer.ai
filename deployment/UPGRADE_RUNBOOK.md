@@ -69,7 +69,7 @@ git tag v<ver>
 git push origin upgrade-to-<ver> --tags
 ```
 
-### ⚠️ Two workflows race on the same tag — disable one
+### Only ONE workflow may publish — fixed 2026-09-17
 
 `build_custom_ee_image.yml` ("Build Custom EE Image with Customizations") **also**
 triggers on `push: tags: v*-ee`, builds the same image and pushes the **same tag** as
@@ -82,9 +82,24 @@ manifest, and the tag only became 2-arch again when the duplicate's own merge jo
 Upstream's `publish_ee_docker.yml` / `publish_foss_docker.yml` also fire on the tag (they
 fail noisily, which is why §9 says to disable them).
 
-**Fix: make `build_custom_ee_image.yml` `workflow_dispatch`-only.** Until then, always
-re-inspect the manifest *after every workflow on the tag has finished*, not just the
-primary one.
+The release-triggered publishers (`publish_ee_github_docker.yml`,
+`publish_github_docker.yml`, `publish_github_docker_beta.yml`) were the same defect
+waiting to fire: they push to this repo's ghcr **and move the floating `:latest`,
+`:latest-ee`, `:beta` tags**, so cutting a GitHub Release here would have overwritten a
+published image with a differently-built one.
+
+**Fixed 2026-09-17:** all six are now `workflow_dispatch`-only, leaving
+`publish_my_ee_docker.yml` as the single automatic publisher (`push: tags: v*`).
+`publish_my_ee_docker.yml` also gained a **pre-publish customization check** that fails
+the build if any fork customization is missing, if the native Kanban sidebar entry comes
+back, or if `enterprise/` is absent.
+
+**If you ever re-enable one of them, this race returns.** Verify with:
+```bash
+for f in .github/workflows/*publish*.yml .github/workflows/build_custom_ee_image.yml; do
+  printf '%s: ' "$f"; awk '/^on:/{f=1;next} /^env:|^jobs:/{f=0} f' "$f" | grep -v '^\s*$\|^ *#' | tr -d ' \n'; echo
+done   # only publish_my_ee_docker.yml may show a push/tags trigger
+```
 
 Verify the build before touching Coolify:
 ```bash
@@ -282,7 +297,9 @@ Image rollback alone is normally enough (most migrations are additive). Restore 
 ## 9. After prod is verified
 
 - Merge `upgrade-to-<ver>` → `main` and tag, so the main line matches production.
-- Disable upstream's `Publish Chatwoot CE/EE` workflows on tag triggers (they fail
-  noisily; only `publish_my_ee_docker.yml` is needed).
+- ~~Disable upstream's publish workflows on tag triggers~~ — **done 2026-09-17**, see §1.
+- Keep `main` equal to what production runs. `main` had drifted behind prod (it lacked the
+  `v4.14.2-fazer-ai.85-ee` sidebar commit), which is what made §0's branch-from-prod rule
+  necessary. Fast-forward `main` to the upgrade branch as part of the cutover, not months later.
 - Update the "Current prod version" row in §0 and the memory file
   `chatwoot-fork-upgrade-2026-06.md`.

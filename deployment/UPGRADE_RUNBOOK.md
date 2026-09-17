@@ -16,32 +16,48 @@
 | Upstream | `fazer-ai/chatwoot` (remote `upstream`) — source of `vX.Y.Z-fazer-ai.N` tags |
 | OSS | `chatwoot/chatwoot` (remote `chatwoot`) |
 | Image (built by us) | `ghcr.io/lucouto/chatwoot.fazer.ai:<tag>-ee` |
-| Build workflow | `.github/workflows/publish_my_ee_docker.yml` — triggers on push of tag `v*`; builds multi-arch (amd64+arm64) with `CW_EDITION=ee`; appends `-ee` to the tag |
+| Build workflow | `.github/workflows/publish_my_ee_docker.yml` — **the only automatic publisher**; on push of tag `v*`, builds multi-arch (amd64+arm64), asserts the fork customizations, appends `-ee` **only if absent** |
 | Deploy platform | **Coolify** on host `vm-coolify-n8n` (ssh `azureuser@vm-coolify-n8n`) |
-| **Live PROD DB container** | `postgres-f8kkkgcsko4sogs88k8c80ok` (Coolify project `f8kkkgcsko4sogs88k8c80ok`) |
-| **STAGING DB container** | `postgres-vkg4sgcco4wg8os4sckws088` (separate Coolify project `vkg4...`) |
+| **PROD Coolify service** | `f8kkkgcsko4sogs88k8c80ok` ("chatwoot-fazer") → https://chatwoot.cheminneuf.community, DB `chatwoot_production` |
+| **STAGING Coolify service** | `vkg4sgcco4wg8os4sckws088` ("Chatwoot Fazer.ai Staging") → https://staging-chatwoot.cheminneuf.community, DB `chatwoot_staging` |
+| Container naming | `<component>-<service-uuid>`, e.g. `postgres-f8kkkgcsko4sogs88k8c80ok`, `rails-vkg4sgcco4wg8os4sckws088` |
+| ⚠️ Not a service uuid | `q4sgkowosk88os848k008o0o` is the Coolify **project** "Production Stack" that contains *every* service — prod, staging and everything unrelated. Both stacks above live inside it; they are separate **services**, not separate projects. |
 | Compose files (repo) | `docker-compose.production-<ver>.yaml`, `docker-compose.staging-<ver>.yaml` |
 | Current prod version | **v4.17.0-fazer-ai.115-ee** (cut over 2026-09-17 19:43 CEST) |
 | Current staging version | **v4.17.0-fazer-ai.115-ee** (as of 2026-09-17) |
+| Repo topology | **single branch `main`** — every historical branch was folded in and deleted 2026-09-17 |
+| Rollback target | `v4.14.2-fazer-ai.85-ee` → commit `6105d475a` (tag, not a branch) |
 
-### ⚠️ Branch from what PROD RUNS, not from `main`
+### ⚠️ Confirm `main` IS what prod runs before branching
 
-`main` is not necessarily production. In Sept 2026 prod was running
-`v4.14.2-fazer-ai.85-ee` = commit `6105d475a` (branch `docs/coolify-ghost-postgres`),
-which carries `fix(sidebar): remove native Kanban entry` — a commit `main` never got.
-Branching the upgrade from `main` would have silently reintroduced the native Kanban
-menu item.
+The repo is single-branch now, so `main` *should* be production — but check, because it
+silently wasn't once. In Sept 2026 prod ran `v4.14.2-fazer-ai.85-ee` = commit `6105d475a`,
+carrying `fix(sidebar): remove native Kanban entry`, which lived on a side branch `main`
+never got. Branching that upgrade off `main` would have reintroduced the native Kanban menu
+item, and nothing would have complained. Two seconds to verify:
 
-**Always resolve the base this way**, then branch from it:
 ```bash
 ssh coolify-vm 'docker inspect rails-f8kkkgcsko4sogs88k8c80ok --format "{{.Config.Image}}"'
-git rev-parse <that-tag>^{commit}    # <- branch from THIS
+git merge-base --is-ancestor $(git rev-parse <that-tag>^{commit}) main \
+  && echo "main contains prod - branch from main" \
+  || echo "DRIFT - branch from the tag's commit, not main"
 ```
 
-**Why we build our own image** (not fazer-ai's stock): we keep customizations.
-As of v4.14.2 the only genuine in-image customization left is the **automation
-custom-attribute filter operators (frontend)** — most others were upstreamed or
-reverted (Azure OpenAI was abandoned entirely).
+Belt as well as braces: §1's publish workflow now fails the build if a fork customization
+is missing, so a wrong base can no longer ship quietly.
+
+**Why we build our own image** (not fazer-ai's stock): we keep customizations. As of
+v4.17.0 there are exactly **three**, all frontend, all asserted by CI on every publish:
+
+| customization | file |
+|---|---|
+| `OPERATOR_TYPES_7` defined | `app/javascript/dashboard/routes/dashboard/settings/automation/operators.js` |
+| text custom attributes use it | `app/javascript/dashboard/helper/automationHelper.js` |
+| custom attributes resolve in create mode too | `app/javascript/dashboard/helper/automationHelper.js` |
+
+Plus one *removal*: the native Kanban sidebar entry stays out of
+`components-next/sidebar/Sidebar.vue` (upstream keeps re-adding it; we use external
+KanbanCW). Everything else was upstreamed or reverted — Azure OpenAI was abandoned.
 
 **The one patch NOT baked into the image** — must stay volume-mounted in every compose:
 ```
@@ -58,41 +74,49 @@ cd ~/Projets_apps_github/fork_chatwoot_fazer_ai
 
 # Sync upstream and merge the target release tag into the upgrade branch
 git fetch upstream --tags
-git checkout -b upgrade-to-<ver>        # or reuse the existing upgrade branch
-git merge <upstream-tag>                # e.g. v4.14.2-fazer-ai.84
-# Resolve conflicts (historically only config/app.yml version line).
+git checkout -b upgrade-to-<ver> main    # main, after the §0 drift check
+git merge <upstream-tag>                # e.g. v4.17.0-fazer-ai.115
+# Resolve conflicts (every upgrade so far: only the config/app.yml version line).
 # Large upstream merges OOM-kill the husky/eslint pre-commit hook — use:
 git commit --no-verify
 
-# Tag + push to trigger the build (the `-ee` suffix is added by the workflow)
-git tag v<ver>
-git push origin upgrade-to-<ver> --tags
+# Tag + push to trigger the build.
+git tag <upstream-tag>-ee               # e.g. v4.17.0-fazer-ai.115-ee
+git push origin upgrade-to-<ver> <upstream-tag>-ee
+```
+
+> **Tag the `-ee` name explicitly.** You cannot reuse the bare upstream tag name — after
+> `git fetch upstream --tags`, `v4.17.0-fazer-ai.115` already exists locally and points at
+> *upstream's* commit, so `git tag v4.17.0-fazer-ai.115` fails. The workflow handles either
+> spelling (it appends `-ee` only when absent), so always tag `<upstream-tag>-ee` and the
+> image lands at `ghcr.io/lucouto/chatwoot.fazer.ai:<upstream-tag>-ee`.
+
+**Before merging, dry-run it in a throwaway worktree** — it costs nothing and tells you the
+conflict surface before you commit to anything:
+```bash
+git worktree add --detach /tmp/mergetest main
+cd /tmp/mergetest && git merge --no-commit --no-ff <upstream-tag>
+git diff --name-only --diff-filter=U        # expect: config/app.yml, nothing else
+cd - && git worktree remove --force /tmp/mergetest
 ```
 
 ### Only ONE workflow may publish — fixed 2026-09-17
 
-`build_custom_ee_image.yml` ("Build Custom EE Image with Customizations") **also**
-triggers on `push: tags: v*-ee`, builds the same image and pushes the **same tag** as
-`publish_my_ee_docker.yml`. Both produce valid EE images, but each platform job of each
-workflow pushes the tag directly, so whichever finishes last wins and the tag content is
-**nondeterministic**. Observed on v4.17.0-fazer-ai.115-ee: the primary workflow published a
-correct 2-arch manifest at 16:42:46, the duplicate then clobbered it with an amd64-only
-manifest, and the tag only became 2-arch again when the duplicate's own merge job finished.
+Six workflows could publish to this repo's ghcr. `build_custom_ee_image.yml` fired on the
+same `v*-ee` tag, built the same image and pushed the **same tag**; since each platform job
+pushes the tag directly, whichever finished last won. On v4.17.0-fazer-ai.115-ee the primary
+workflow published a correct 2-arch manifest at 16:42:46, the duplicate clobbered it with an
+amd64-only one, and it only became 2-arch again when the duplicate's own merge job finished.
+Both were valid EE images — *which* one you got was luck.
 
-Upstream's `publish_ee_docker.yml` / `publish_foss_docker.yml` also fire on the tag (they
-fail noisily, which is why §9 says to disable them).
+The three release-triggered publishers were the same defect unfired: they push to this ghcr
+**and move the floating `:latest` / `:latest-ee` / `:beta`**, so cutting a GitHub Release
+would have overwritten a published image with a differently-built one.
 
-The release-triggered publishers (`publish_ee_github_docker.yml`,
-`publish_github_docker.yml`, `publish_github_docker_beta.yml`) were the same defect
-waiting to fire: they push to this repo's ghcr **and move the floating `:latest`,
-`:latest-ee`, `:beta` tags**, so cutting a GitHub Release here would have overwritten a
-published image with a differently-built one.
-
-**Fixed 2026-09-17:** all six are now `workflow_dispatch`-only, leaving
-`publish_my_ee_docker.yml` as the single automatic publisher (`push: tags: v*`).
-`publish_my_ee_docker.yml` also gained a **pre-publish customization check** that fails
-the build if any fork customization is missing, if the native Kanban sidebar entry comes
-back, or if `enterprise/` is absent.
+**All six are now `workflow_dispatch`-only**, leaving `publish_my_ee_docker.yml` as the sole
+automatic publisher (`push: tags: v*`). It also gained a **pre-publish check** that fails the
+build if any of the three customizations is missing, if the native Kanban entry returns, or
+if `enterprise/` is absent.
 
 **If you ever re-enable one of them, this race returns.** Verify with:
 ```bash
@@ -303,17 +327,49 @@ In Coolify set both `rails` and `sidekiq` back to the previous tag and redeploy:
 ```yaml
 image: 'ghcr.io/lucouto/chatwoot.fazer.ai:<previous-ver>-ee'
 ```
-Image rollback alone is normally enough (most migrations are additive). Restore from the
-§5 dump only if a migration corrupted data.
+**Current rollback target: `v4.14.2-fazer-ai.85-ee`** (commit `6105d475a`).
+
+Image rollback alone is normally enough — migrations are additive, and 4.14.2 tolerates the
+4.17 schema. Restore from the §5 dump only if a migration corrupted data.
+
+Rollback does **not** depend on any branch. All upgrade branches were deleted 2026-09-17;
+every commit that matters is pinned by a tag and reachable from `main`:
+
+| tag | commit | what it is |
+|---|---|---|
+| `v4.17.0-fazer-ai.115-ee` | `0478ecdf7` | what prod runs (Instance Status shows `Build 0478ecd`) |
+| `v4.14.2-fazer-ai.85-ee` | `6105d475a` | rollback target |
+
+If you roll back, put the §5 dump somewhere safe first — it is the only copy of the
+pre-cutover data.
 
 ---
 
 ## 9. After prod is verified
 
-- Merge `upgrade-to-<ver>` → `main` and tag, so the main line matches production.
-- ~~Disable upstream's publish workflows on tag triggers~~ — **done 2026-09-17**, see §1.
-- Keep `main` equal to what production runs. `main` had drifted behind prod (it lacked the
-  `v4.14.2-fazer-ai.85-ee` sidebar commit), which is what made §0's branch-from-prod rule
-  necessary. Fast-forward `main` to the upgrade branch as part of the cutover, not months later.
-- Update the "Current prod version" row in §0 and the memory file
-  `chatwoot-fork-upgrade-2026-06.md`.
+Do this in the same session as the cutover. The drift in §0 happened precisely because it
+was left for later.
+
+```bash
+# 1. main takes the upgrade, then the branch goes away - keep the repo single-branch
+git checkout main && git merge --ff-only upgrade-to-<ver>
+git push origin main
+git branch -d upgrade-to-<ver>                 # -d, not -D: it must refuse if unmerged
+git push origin --delete upgrade-to-<ver>
+```
+
+2. **Backups on the Coolify host.** Keep the pre-cutover dump until the new version has run
+   a few normal days — it is the rollback data. Delete any rehearsal dump from §2, which is
+   redundant the moment the cutover succeeds. Verify the keeper is readable *before*
+   removing the other, so there is never a moment without a good backup:
+   ```bash
+   docker run --rm -v /home/azureuser:/bk pgvector/pgvector:pg16 \
+     pg_restore -l /bk/<keep>.dump | wc -l      # ~1230 entries, no stderr
+   rm /home/azureuser/<redundant>.dump
+   ```
+
+3. **Update this file**: the `Current prod version` / `Rollback target` rows in §0, and the
+   §5 measured-cost table if the numbers moved. Then the memory file
+   `chatwoot-fork-upgrade-2026-06.md`.
+
+4. Leave the release tags alone forever — §8 rollback depends on them, not on branches.

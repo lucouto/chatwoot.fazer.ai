@@ -12,12 +12,13 @@ json.meta do
       json.partial! 'api/v1/models/agent_bot_slim', formats: [:json], resource: conversation.assigned_entity
     end
     json.assignee_type 'AgentBot'
-  elsif conversation.assigned_entity&.account
+  elsif conversation.assigned_entity.is_a?(User)
     json.assignee do
       json.partial! 'api/v1/models/agent', formats: [:json], resource: conversation.assigned_entity
     end
     json.assignee_type 'User'
   end
+  json.partial! 'enterprise/api/v1/conversations/partials/assignee', conversation: conversation if ChatwootApp.enterprise?
   if conversation.team.present?
     json.team do
       json.partial! 'api/v1/models/team', formats: [:json], resource: conversation.team
@@ -48,7 +49,7 @@ json.muted conversation.muted?
 json.snoozed_until conversation.snoozed_until
 json.status conversation.status
 json.created_at conversation.created_at.to_i
-json.updated_at conversation.updated_at.to_f
+json.updated_at conversation.updated_at&.floor(6).to_f
 json.timestamp conversation.last_activity_at.to_i
 json.first_reply_created_at conversation.first_reply_created_at.to_i
 json.unread_count conversation.unread_incoming_messages.count
@@ -81,6 +82,9 @@ json.group_type conversation.group_type
 # `contact_inbox` is preloaded for the list, but the question is meaningless anywhere
 # else and an always-false field on every conversation is noise.
 json.group_left conversation.contact_inbox&.group_left? if conversation.group_type_group?
+# When this number's session last answered that it has no WhatsApp account, which is what the
+# conversation warns about. Only WhatsApp inboxes carry it; nil once the number is known to exist.
+json.whatsapp_missing_checked_at conversation.contact_inbox&.whatsapp_missing_checked_at&.to_i if conversation.inbox.whatsapp?
 json.priority conversation.priority
 json.waiting_since conversation.waiting_since.to_i.to_i
 sla_applicable = conversation.account.feature_enabled?('sla') && (!conversation.respond_to?(:sla_applicable?) || conversation.sla_applicable?)

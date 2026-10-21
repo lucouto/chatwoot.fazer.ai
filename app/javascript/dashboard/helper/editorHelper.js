@@ -8,6 +8,7 @@ import {
 } from '@chatwoot/prosemirror-schema';
 import * as Sentry from '@sentry/vue';
 import camelcaseKeys from 'camelcase-keys';
+import { getMessageVariables } from '@chatwoot/utils';
 import { FORMATTING, MARKDOWN_PATTERNS } from 'dashboard/constants/editor';
 import { INBOX_TYPES, TWILIO_CHANNEL_MEDIUM } from 'dashboard/helper/inbox';
 
@@ -128,8 +129,20 @@ export function cleanSignature(signature) {
 const stripDelimiterHardbreaks = body =>
   body.replace(/(--)\s*(?:\\\s*)+$/, '$1');
 
-// Strip standalone blank-paragraph markers (`\` on their own lines).
-const stripTrailingBlankLine = body => body.replace(/\n(?:\s*\\\n)+$/, '');
+// Strip standalone blank-paragraph markers (`\` on their own lines), plus
+// the bare `\` the serializer writes to escape the `--` delimiter into `\--`
+// (left behind once the delimiter itself is sliced off). Two shapes end in that
+// escape after the slice: `hey\` LF `\` (Shift+Enter, the trailing `\` on the
+// content line is a hard-break marker and goes too) and `C:\` LF LF `\` LF `\`
+// (a blank line separates content from the glue; the serializer emits authored
+// backslashes verbatim, so a `\` before a blank line is user content and must
+// stay). A marker's newline is never blank, so the marker alternative only
+// crosses single newlines ([^\S\n] excludes `\n`) while the plain alternative
+// starts at the newline and may cross blank lines.
+const stripTrailingBlankLine = body =>
+  body
+    .replace(/(?:\\\n(?:[^\S\n]*\\\n)*[^\S\n]*\\|\n(?:\s*\\\n)*\s*\\)$/, '')
+    .replace(/\n(?:\s*\\\n)+$/, '');
 
 /**
  * Check if there's an unedited signature at the end of the body
@@ -322,9 +335,19 @@ export function insertAtCursor(editorView, node, from, to) {
     node = node.firstChild.content;
   }
 
+  // The cursor sits in an empty paragraph when the editor is empty, and also
+  // when the editor keeps an empty first line above a signature. Inserting
+  // block content there splits that paragraph and strands a blank line, so
+  // replace the paragraph instead.
+  const $from = editorView.state.doc.resolve(from);
+  const isInEmptyParagraph =
+    $from.parent.type.name === 'paragraph' && $from.parent.content.size === 0;
+
   let tr;
   if (to) {
     tr = editorView.state.tr.replaceWith(from, to, node).insertText(` `);
+  } else if (isInEmptyParagraph && !isWrappedInParagraph) {
+    tr = editorView.state.tr.replaceWith($from.before(), $from.after(), node);
   } else {
     tr = editorView.state.tr.insert(from, node);
   }
@@ -465,6 +488,14 @@ export const getAgentVariables = user => ({
 export const getContactVariables = contact =>
   getNameVariables('contact', contact?.name);
 
+// Variables the editor resolves while composing a reply. Matches the backend
+// drops: names are Ruby-capitalized and {{agent.*}} is the sender, not the assignee.
+export const getReplyVariables = ({ conversation, contact, inbox, user }) => ({
+  ...getMessageVariables({ conversation, contact, inbox }),
+  ...getContactVariables(contact),
+  ...getAgentVariables(user),
+});
+
 // Resolves a manually typed {{variable}} to its value on the closing braces.
 // Leaves the placeholder when there's no value, the value is Liquid, or it's a private note.
 export const createVariableInputRule = ({ isPrivate, getVariables }) => {
@@ -479,6 +510,55 @@ export const createVariableInputRule = ({ isPrivate, getVariables }) => {
     }
   );
   return inputRules({ rules: [rule] });
+};
+
+// The variable in the text typed after `{{`: what comes before its closing braces, or before a
+// comma when it was never closed. What follows (braces, punctuation) is not part of it.
+export const variableContent = (typedAfterTrigger = '') =>
+  typedAfterTrigger.split(/[},]/)[0];
+
+// What a picker hands back when it cannot complete its search, turned into the edit that puts it
+// in the document. The suggestion range runs from the trigger to the next space. After `{{` it can
+// hold the variable's closing braces and the punctuation after them (`{{contact.name}},`), which
+// the search never showed; after any other trigger the whole token is what the search showed.
+// - The caret sat past the token's content (past a variable's closing braces): what was typed
+//   there goes on after it.
+// - Otherwise the content becomes what the search held: the content plus what was typed after
+//   it, or, with `replace`, the edited search. Braces typed in a variable's search close it in
+//   place of the document's own, since the picker lets go on the first one and the next goes to
+//   the editor. The caret is left at the end of the content, so typing goes on inside it.
+export const releasedSearchTransaction = (
+  state,
+  range,
+  { text, replace = false } = {},
+  trigger = '{{'
+) => {
+  if (!text) return null;
+  if (!range) return state.tr.insertText(text);
+
+  const isVariable = trigger === '{{';
+  const from = range.from + trigger.length;
+  const typedAfterTrigger = state.doc.textBetween(from, range.to);
+  const contentLength = isVariable
+    ? variableContent(typedAfterTrigger).length
+    : typedAfterTrigger.length;
+  const closingBraces = isVariable
+    ? typedAfterTrigger.slice(contentLength).match(/^}*/)[0].length
+    : 0;
+  const variableEnd = from + contentLength + closingBraces;
+  if (!replace && state.selection.from >= variableEnd) {
+    return state.tr.insertText(text);
+  }
+
+  const content = replace
+    ? text
+    : typedAfterTrigger.slice(0, contentLength) + text;
+  const replacedTo =
+    isVariable && text.includes('}') ? variableEnd : from + contentLength;
+  const transaction = state.tr.insertText(content, from, replacedTo);
+  return transaction.setSelection(
+    Selection.near(transaction.doc.resolve(from + content.length))
+  );
 };
 
 /**

@@ -2,7 +2,6 @@
 import { mapGetters } from 'vuex';
 import { useAlert } from 'dashboard/composables';
 import { useWhatsappEmbeddedSignup } from 'dashboard/composables/useWhatsappEmbeddedSignup';
-import { FEATURE_FLAGS } from 'dashboard/featureFlags';
 import whatsappChannel from 'dashboard/api/channel/whatsappChannel';
 import inboxMixin from 'shared/mixins/inboxMixin';
 import SettingsSection from '../../../../../components/SettingsSection.vue';
@@ -21,8 +20,11 @@ import WhatsappLinkDeviceModal from '../components/WhatsappLinkDeviceModal.vue';
 import SessionProviderConfiguration from './SessionProviderConfiguration.vue';
 import WhatsappHistorySync from './WhatsappHistorySync.vue';
 import WhatsappBusinessManagementToken from './WhatsappBusinessManagementToken.vue';
+import WhatsappAppSecret from './WhatsappAppSecret.vue';
+import ZapiWebhookUrl from './ZapiWebhookUrl.vue';
 import InboxName from 'dashboard/components/widgets/InboxName.vue';
 import Switch from 'dashboard/components-next/switch/Switch.vue';
+import HmacSecretKey from './components/HmacSecretKey.vue';
 
 export default {
   components: {
@@ -39,9 +41,12 @@ export default {
     SessionProviderConfiguration,
     WhatsappHistorySync,
     WhatsappBusinessManagementToken,
+    WhatsappAppSecret,
+    ZapiWebhookUrl,
     InboxName,
     // eslint-disable-next-line vue/no-reserved-component-names
     Switch,
+    HmacSecretKey,
   },
   mixins: [inboxMixin],
   props: {
@@ -90,23 +95,13 @@ export default {
   },
   computed: {
     ...mapGetters({
-      accountId: 'getCurrentAccountId',
-      isFeatureEnabledonAccount: 'accounts/isFeatureEnabledonAccount',
       isOnChatwootCloud: 'globalConfig/isOnChatwootCloud',
     }),
     isEmbeddedSignupWhatsApp() {
       return this.inbox.provider_config?.source === 'embedded_signup';
     },
     showWhatsAppReconfigure() {
-      return (
-        this.isEmbeddedSignupWhatsApp &&
-        this.isFeatureEnabledonAccount(
-          this.accountId,
-          this.isOnChatwootCloud
-            ? FEATURE_FLAGS.WHATSAPP_EMBEDDED_SIGNUP_FLOW
-            : FEATURE_FLAGS.WHATSAPP_RECONFIGURE
-        )
-      );
+      return this.isEmbeddedSignupWhatsApp;
     },
     isForwardingEnabled() {
       return !!this.inbox.forwarding_enabled;
@@ -460,7 +455,7 @@ export default {
           <p class="mb-1 text-sm font-medium text-n-slate-12">
             {{ $t('INBOX_MGMT.SETTINGS_POPUP.IDENTITY_VALIDATION.SECRET_KEY') }}
           </p>
-          <woot-code :script="inbox.hmac_token" />
+          <HmacSecretKey :inbox="inbox" />
           <p class="mt-1.5 text-label-small text-n-slate-11">
             {{ $t('INBOX_MGMT.SETTINGS_POPUP.HMAC_DESCRIPTION') }}
             <a
@@ -502,7 +497,7 @@ export default {
       :label="$t('INBOX_MGMT.SETTINGS_POPUP.HMAC_VERIFICATION')"
       :help-text="$t('INBOX_MGMT.SETTINGS_POPUP.HMAC_DESCRIPTION')"
     >
-      <woot-code :script="inbox.hmac_token" />
+      <HmacSecretKey :inbox="inbox" />
     </SettingsFieldSection>
     <SettingsFieldSection
       :label="$t('INBOX_MGMT.SETTINGS_POPUP.HMAC_MANDATORY_VERIFICATION')"
@@ -547,7 +542,7 @@ export default {
     </div>
     <ConversationContinuitySettings :inbox="inbox" />
     <ImapSettings :inbox="inbox" />
-    <SmtpSettings v-if="inbox.imap_enabled" :inbox="inbox" />
+    <SmtpSettings :inbox="inbox" />
   </div>
   <div v-else-if="isAWhatsAppCloudChannel">
     <div v-if="inbox.provider_config">
@@ -590,6 +585,7 @@ export default {
         >
           <woot-code :script="inbox.provider_config.webhook_verify_token" />
         </SettingsFieldSection>
+        <WhatsappAppSecret :inbox="inbox" />
         <SettingsFieldSection
           :label="$t('INBOX_MGMT.SETTINGS_POPUP.WHATSAPP_SECTION_TITLE')"
           :help-text="
@@ -955,6 +951,7 @@ export default {
           </NextButton>
         </div>
       </SettingsSection>
+      <ZapiWebhookUrl :inbox="inbox" />
     </div>
   </div>
 </template>

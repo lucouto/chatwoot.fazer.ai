@@ -3,6 +3,7 @@ import { computed, useTemplateRef } from 'vue';
 import { useToggle } from '@vueuse/core';
 import { useI18n } from 'vue-i18n';
 import { dynamicTime } from 'shared/helpers/timeHelper';
+import { useExactTimestamp } from 'shared/composables/useExactTimestamp';
 import {
   ARTICLE_MENU_ITEMS,
   ARTICLE_MENU_OPTIONS,
@@ -51,6 +52,11 @@ const props = defineProps({
     type: Number,
     required: true,
   },
+  // Given when the list is ordered by creation, so the card shows the date the list is sorted by.
+  createdAt: {
+    type: Number,
+    default: null,
+  },
   isSelected: {
     type: Boolean,
     default: false,
@@ -77,6 +83,8 @@ const emit = defineEmits([
   'draftResolved',
   'draftFailed',
 ]);
+
+const exactTimestamp = useExactTimestamp();
 
 const { t } = useI18n();
 
@@ -169,6 +177,11 @@ const authorThumbnailSrc = computed(() => {
 });
 
 const lastUpdatedAt = computed(() => {
+  if (props.createdAt) {
+    return t('HELP_CENTER.ARTICLES_PAGE.ARTICLE_CARD.CARD.CREATED', {
+      time: dynamicTime(props.createdAt),
+    });
+  }
   return dynamicTime(props.updatedAt);
 });
 
@@ -290,7 +303,13 @@ const handleClick = id => {
           </span>
         </div>
       </div>
-      <span class="text-sm text-n-slate-11 line-clamp-1 shrink-0">
+      <span
+        v-tooltip.top="{
+          content: exactTimestamp(createdAt || updatedAt),
+          delay: { show: 500, hide: 0 },
+        }"
+        class="text-sm text-n-slate-11 line-clamp-1 shrink-0"
+      >
         {{ lastUpdatedAt }}
       </span>
     </div>

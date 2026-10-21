@@ -12,7 +12,7 @@ import {
   defineEmits,
 } from 'vue';
 import { useStore } from 'vuex';
-import { useRoute, useRouter } from 'vue-router';
+import { useRouter, useRoute } from 'vue-router';
 import {
   useMapGetter,
   useFunctionGetter,
@@ -50,23 +50,22 @@ import ConversationAPI from 'dashboard/api/inbox/conversation';
 import wootConstants from 'dashboard/constants/globals';
 import advancedFilterOptions from './widgets/conversation/advancedFilterItems';
 import filterQueryGenerator from '../helper/filterQueryGenerator.js';
+import { parseRouteFilters } from 'dashboard/helper/validations';
 import languages from 'dashboard/components/widgets/conversation/advancedFilterItems/languages';
 import countries from 'shared/constants/countries';
 import { generateValuesForEditCustomViews } from 'dashboard/helper/customViewsHelper';
-import { conversationListPageURL } from '../helper/URLHelper';
-import {
-  isOnMentionsView,
-  isOnParticipatingView,
-  isOnUnattendedView,
-} from '../store/modules/conversations/helpers/actionHelpers';
+import { useConversationRoutePath } from 'dashboard/composables/useConversationRoutePath';
 import {
   getUserPermissions,
   getUserRole,
   filterItemsByPermission,
   getVisibleAssigneeTabPermissions,
 } from 'dashboard/helper/permissionsHelper.js';
-import { matchesFilters } from '../store/modules/conversations/helpers/filterHelpers';
-import { humanAssignee } from '../store/modules/conversations/helpers';
+import { createFiltersMatcher } from '../store/modules/conversations/helpers/filterHelpers';
+import {
+  humanAssignee,
+  sortComparator,
+} from '../store/modules/conversations/helpers';
 import { CONVERSATION_EVENTS } from '../helper/AnalyticsHelper/events';
 
 const props = defineProps({
@@ -85,6 +84,8 @@ const { t } = useI18n();
 const router = useRouter();
 const route = useRoute();
 const store = useStore();
+const { buildConversationPath, buildConversationListPath } =
+  useConversationRoutePath();
 
 const resolveAttributesModalRef = ref(null);
 
@@ -96,7 +97,7 @@ const showAdvancedFilters = ref(false);
 // chatsOnView is to store the chats that are currently visible on the screen,
 // which mirrors the conversationList.
 const chatsOnView = ref([]);
-const foldersQuery = ref({});
+const foldersQuery = useMapGetter('getAppliedConversationFiltersQuery');
 const showAddFoldersModal = ref(false);
 const showDeleteFoldersModal = ref(false);
 const appliedFilter = ref([]);
@@ -118,6 +119,7 @@ const pinnedAtById = useMapGetter('conversationPins/getRecords');
 const activeInbox = useMapGetter('getSelectedInbox');
 const conversationStats = useMapGetter('conversationStats/getStats');
 const appliedFilters = useMapGetter('getAppliedConversationFiltersV2');
+const appliedContactFilter = useMapGetter('getAppliedContactFilter');
 const folders = useMapGetter('customViews/getConversationCustomViews');
 const agentList = useMapGetter('agents/getAgents');
 const teamsList = useMapGetter('teams/getTeams');
@@ -353,19 +355,10 @@ function filterByAssigneeTab(conversations) {
 }
 
 function sortByUnreadStatus(conversations) {
-  return [...conversations].sort((a, b) => {
-    // Pinned conversations lead this sort too, mirroring what every other sort option does.
-    const pinnedAtA = pinnedAtById.value[a.id];
-    const pinnedAtB = pinnedAtById.value[b.id];
-    if (pinnedAtA && pinnedAtB) return pinnedAtB - pinnedAtA;
-    if (pinnedAtA) return -1;
-    if (pinnedAtB) return 1;
-
-    const unreadCountDiff = (b.unread_count || 0) - (a.unread_count || 0);
-    if (unreadCountDiff !== 0) return unreadCountDiff;
-
-    return (b.last_activity_at || 0) - (a.last_activity_at || 0);
-  });
+  // Pinned conversations lead this sort too, mirroring what every other sort option does.
+  return [...conversations].sort((a, b) =>
+    sortComparator(a, b, wootConstants.SORT_BY_TYPE.UNREAD, pinnedAtById.value)
+  );
 }
 
 const conversationList = computed(() => {
@@ -392,16 +385,15 @@ const conversationList = computed(() => {
 
   if (activeFolder.value) {
     const { payload } = activeFolder.value.query;
-    localConversationList = localConversationList.filter(conversation => {
-      return matchesFilters(conversation, payload);
-    });
+    localConversationList = localConversationList.filter(
+      createFiltersMatcher(payload)
+    );
   }
 
-  // Filtered lists included. `unread` is the one option with no entry in the store's
-  // SORT_OPTIONS, so `getFilteredConversations` re-sorts by last activity and silently
-  // undoes what the server returned; this pass is what puts the order back. Skipping it
-  // for folders was harmless only while the sort control was hidden there.
-  if (activeSortBy.value === wootConstants.SORT_BY_TYPE.UNREAD) {
+  if (
+    !hasAppliedFiltersOrActiveFolders.value &&
+    activeSortBy.value === wootConstants.SORT_BY_TYPE.UNREAD
+  ) {
     localConversationList = sortByUnreadStatus(localConversationList);
   }
 
@@ -478,11 +470,24 @@ function fetchSavedFilteredConversations(payload) {
 
 function onApplyFilter(payload) {
   payload = useSnakeCase(payload);
-  resetBulkActions();
-  foldersQuery.value = filterQueryGenerator(payload);
-  store.dispatch('conversationPage/reset');
-  store.dispatch('emptyAllConversations');
-  fetchFilteredConversations(payload);
+  showAdvancedFilters.value = false;
+  store
+    .dispatch('applyConversationFilters', { filters: payload })
+    .catch(() => useAlert(t('CHAT_LIST.FETCH_ERROR')))
+    .finally(emitConversationLoaded);
+}
+
+function applyRouteFilters() {
+  const { filters: serializedFilters, ...query } = route.query;
+  if (!serializedFilters) return false;
+
+  router.replace({ query });
+  const filters = parseRouteFilters(serializedFilters);
+  if (!filters) return false;
+
+  store.dispatch('setConversationFilters', filters);
+  onApplyFilter(filters);
+  return true;
 }
 
 function closeAdvanceFiltersModal() {
@@ -604,6 +609,7 @@ function initializeFolderToFilterModal(newActiveFolder) {
 
     return {
       attributeKey: transformed.attributeKey,
+      timezone: transformed.timezone,
       attributeModel: transformed.attributeModel,
       customAttributeType: transformed.customAttributeType,
       filterOperator: transformed.filterOperator,
@@ -659,6 +665,18 @@ function resetAndFetchData() {
   fetchConversations();
 }
 
+// Leaving a contact's history lands on its latest conversation; the expanded list has no open thread.
+function resetFilters() {
+  const latestConversation =
+    appliedContactFilter.value &&
+    !props.isOnExpandedLayout &&
+    chatLists.value[0];
+  if (latestConversation) {
+    router.push(buildConversationPath(latestConversation.id));
+  }
+  resetAndFetchData();
+}
+
 function loadMoreConversations() {
   if (hasCurrentPageEndReached.value || chatListLoading.value) {
     return;
@@ -681,6 +699,9 @@ function updateAssigneeTab(selectedTab) {
     activeAssigneeTab.value = selectedTab;
     if (!currentPage.value) {
       fetchConversations();
+    } else {
+      store.dispatch('invalidateConversationListRequests');
+      store.dispatch('updateChatListFilters', conversationFilters.value);
     }
   }
 }
@@ -694,16 +715,16 @@ function onBasicFilterChange(value, type) {
     activeSortBy.value = value;
   }
 
-  // An ad-hoc filter cannot go through resetAndFetchData: that path calls
-  // `clearConversationFilters` and falls back to the unfiltered list, so re-sorting would
-  // silently throw the agent's filter away. It never showed before because this control
-  // was hidden whenever a filter was applied. Folders are safe there (resetAndFetchData
-  // refetches the saved query), so only this branch is special-cased.
-  if (hasAppliedFilters.value && !hasActiveFolders.value) {
+  if (type === 'sort' && hasAppliedFiltersOrActiveFolders.value) {
     resetBulkActions();
     store.dispatch('conversationPage/reset');
     store.dispatch('emptyAllConversations');
-    fetchFilteredConversations(appliedFilters.value);
+
+    if (hasActiveFolders.value) {
+      fetchSavedFilteredConversations(activeFolder.value.query);
+    } else {
+      fetchFilteredConversations(appliedFilters.value);
+    }
     return;
   }
 
@@ -729,29 +750,7 @@ function openLastItemAfterDeleteInFolder() {
 }
 
 function redirectToConversationList() {
-  const {
-    params: { accountId, inbox_id: inboxId, label, teamId },
-    name,
-  } = route;
-
-  let conversationType = '';
-  if (isOnMentionsView({ route: { name } })) {
-    conversationType = wootConstants.CONVERSATION_TYPE.MENTION;
-  } else if (isOnParticipatingView({ route: { name } })) {
-    conversationType = wootConstants.CONVERSATION_TYPE.PARTICIPATING;
-  } else if (isOnUnattendedView({ route: { name } })) {
-    conversationType = wootConstants.CONVERSATION_TYPE.UNATTENDED;
-  }
-  router.push(
-    conversationListPageURL({
-      accountId,
-      conversationType: conversationType,
-      customViewId: props.foldersId,
-      inboxId,
-      label,
-      teamId,
-    })
-  );
+  router.push(buildConversationListPath());
 }
 
 async function togglePin(conversationId) {
@@ -979,7 +978,7 @@ onMounted(() => {
   store.dispatch('setChatStatusFilter', activeStatus.value);
   store.dispatch('setChatSortFilter', activeSortBy.value);
   store.dispatch('setChatGroupTypeFilter', activeGroupType.value);
-  resetAndFetchData();
+  if (!applyRouteFilters()) resetAndFetchData();
   if (hasActiveFolders.value) {
     store.dispatch('campaigns/get');
   }
@@ -1056,11 +1055,8 @@ watch(chatLists, () => {
   chatsOnView.value = conversationList.value;
 });
 
-watch(conversationFilters, (newVal, oldVal) => {
-  if (newVal !== oldVal) {
-    store.dispatch('updateChatListFilters', newVal);
-  }
-});
+// Filters can be applied from outside the list, so clear the selection here.
+watch(appliedFilters, () => resetBulkActions());
 </script>
 
 <template>
@@ -1074,6 +1070,7 @@ watch(conversationFilters, (newVal, oldVal) => {
     <slot />
     <ChatListHeader
       :page-title="pageTitle"
+      :contact-filter="appliedContactFilter"
       :has-applied-filters="hasAppliedFilters"
       :has-active-folders="hasActiveFolders"
       :can-manage-active-folder="canManageActiveFolder"
@@ -1084,7 +1081,7 @@ watch(conversationFilters, (newVal, oldVal) => {
       @add-folders="onClickOpenAddFoldersModal"
       @delete-folders="onClickOpenDeleteFoldersModal"
       @filters-modal="onToggleAdvanceFiltersModal"
-      @reset-filters="resetAndFetchData"
+      @reset-filters="resetFilters"
       @basic-filter-change="onBasicFilterChange"
     />
 

@@ -51,6 +51,9 @@ module AssignmentHandler
   # puts an AgentBot in `Current.user`, and its id lives in a different sequence
   # than `users.id`, so comparing the two would match by coincidence.
   def assignment_change_allowed?(current_assignee_id)
+    # Dropping the assignee on reopen hands the conversation to nobody, so it is not a takeover,
+    # whoever is in Current.user (an API inbox can post the customer's message with an agent token).
+    return true if reopen_team_unassignment? || reopen_agent_bot_handoff?
     return true unless Current.user.is_a?(User)
     return true if Current.user.id == current_assignee_id
 
@@ -59,7 +62,7 @@ module AssignmentHandler
 
   def ensure_assignee_is_from_team
     return unless team_id_changed?
-    return if assignee_agent_bot_id.present?
+    return if ai_assignee_type.present?
 
     validate_current_assignee_team
     self.assignee ||= find_assignee_from_team
@@ -78,7 +81,9 @@ module AssignmentHandler
 
   def notify_assignment_change
     {
-      ASSIGNEE_CHANGED => -> { saved_change_to_assignee_id? || saved_change_to_assignee_agent_bot_id? },
+      ASSIGNEE_CHANGED => lambda {
+        saved_change_to_assignee_id? || saved_change_to_assignee_agent_bot_id? || saved_change_to_ai_assignee_type?
+      },
       TEAM_CHANGED => -> { saved_change_to_team_id? }
     }.each do |event, condition|
       condition.call && dispatcher_dispatch(event, previous_changes)

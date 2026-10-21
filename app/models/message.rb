@@ -94,6 +94,13 @@ class Message < ApplicationRecord
   # the channel's answer instead of going out on the optimistic write. See `#announce_edit`.
   attr_accessor :defer_edit_announcement
 
+  # The digest of the body a recovery brought into this row, written by the WhatsApp session writer in
+  # the same save as that body and never taken off. The announcement debt beside it is a debt and comes
+  # off as soon as the announcement is enqueued; this is a fact about where the body came from, and it
+  # has to outlive the announcement. It is what lets a write-back tell "the body I just restored is the
+  # one a recovery brought" from "the body I just restored is an edit somebody made". #666
+  RECOVERED_BODY = 'recovered_body'.freeze
+
   enum message_type: { incoming: 0, outgoing: 1, activity: 2, template: 3 }
   enum content_type: {
     text: 0,
@@ -130,7 +137,8 @@ class Message < ApplicationRecord
 
   store :content_attributes, accessors: [:submitted_email, :items, :submitted_values, :email, :in_reply_to, :deleted,
                                          :external_created_at, :story_sender, :story_id, :external_error,
-                                         :translations, :in_reply_to_external_id, :is_unsupported, :data,
+                                         :translations, :translation_failed, :translation_provider, :source_language,
+                                         :in_reply_to_external_id, :is_unsupported, :data,
                                          :is_reaction, :is_edited, :previous_content, :zapi_args, :referral, :rich,
                                          :deleted_by_contact, :pending_source_id, :edited_at, :is_masked], coder: JSON
 
@@ -140,6 +148,7 @@ class Message < ApplicationRecord
   scope :chat, -> { where.not(message_type: :activity).where(private: false) }
   scope :non_activity_messages, -> { where.not(message_type: :activity).reorder('created_at desc') }
   scope :today, -> { where("date_trunc('day', created_at) = ?", Date.current) }
+  scope :not_forwarded, -> { where("(messages.content_attributes #>> '{}')::jsonb -> 'forwarded_message_id' IS NULL") }
   scope :voice_calls, -> { where(content_type: :voice_call) }
   # Excludes reactions whose user-facing state is invisible (toggled off or
   # blank). Used when picking a "last meaningful message" for chat list
@@ -173,6 +182,8 @@ class Message < ApplicationRecord
   after_create_commit :execute_after_create_commit_callbacks
 
   after_update_commit :dispatch_update_event
+  # One registration: Rails keeps only the last of two commit callbacks naming the same method.
+  after_commit :clear_whatsapp_missing_flag, on: [:create, :update], if: :proves_whatsapp_presence?
   after_commit :reindex_for_search, if: :should_index?, on: [:create, :update]
 
   def channel_token
@@ -251,6 +262,10 @@ class Message < ApplicationRecord
     true
   end
 
+  def forwarded?
+    content_attributes['forwarded_message_id'].present?
+  end
+
   def auto_reply_email?
     return false unless incoming_email? || inbox.email?
 
@@ -295,6 +310,7 @@ class Message < ApplicationRecord
     return false if conversation.messages.outgoing
                                 .where.not(sender_type: ['AgentBot', 'Captain::Assistant'])
                                 .where.not(private: true)
+                                .not_forwarded
                                 .where("(additional_attributes->'campaign_id') is null").count > 1
 
     true
@@ -352,12 +368,44 @@ class Message < ApplicationRecord
   end
 
   # An edit typed by an agent is written before the channel has taken it (`MessagesController#edit_content`
-  # writes, then asks), and written back when the channel refuses. Neither of those is an edit anybody
-  # made: the contact still has the body they always had. The caller that writes optimistically sets this
-  # and announces itself once the channel has accepted, and the write-back is covered by the same flag,
-  # which would otherwise announce a second time on a rollback that restores an already edited body.
+  # writes, then asks), and written back when the channel refuses. The optimistic write is not an edit
+  # anybody made -- the contact still has the body they always had -- so the caller sets the flag above and
+  # calls this once the channel has accepted.
+  #
+  # The write-back calls it too, and that is deliberate. When it restores a body an earlier edit had put
+  # there, that body is the one the contact has, and the rules for it may never have run: the announcement
+  # that named it found the refused body on the row and stood down (#660). Announcing it again costs
+  # nothing, because the claim is taken on the body and a rule that already ran for it does not run twice.
+  # A write-back that undoes a first edit announces nothing, and `edited_in_place?` is what says so: the
+  # marker comes off in the same write.
   def announce_edit
     send_edited_event if edited_in_place?
+  end
+
+  # What the write-back after a refused edit has to say, which is two things and not one.
+  #
+  # The edit half is `announce_edit` above. The other half is the recovery: the announcement that named
+  # the recovered body found the optimistic edit on the row and stood down (#661), and the refusal has
+  # just put that body back with nobody having asked the arrival rules about it (#666). Only when the
+  # body it restored is the recovered one -- a write-back that undoes a second edit restores the first
+  # edit's body, and announcing that as recovered would have the rules answer about a body no recovery
+  # ever carried, which is the defect #661 closed.
+  #
+  # Announcing again when the recovery was in fact evaluated costs nothing: `AutomationRuleListener`
+  # only proceeds for a tracked placeholder arrival, and the run claim it takes is per message, so a
+  # rule that already ran for this row does not run twice.
+  def announce_restored_body
+    announce_edit
+    send_recovered_event if showing_recovered_body?
+  end
+
+  # When WhatsApp says the message happened, which for an imported one is long before the
+  # row was written. WhatsApp stamps whole seconds, so this is the end of that second: a reply
+  # stamped in the second a lookup started may have been sent after it, and a reply proves the
+  # number either way, so the tie goes to presence.
+  def whatsapp_sent_at
+    seconds = content_attributes&.dig('external_created_at').presence
+    (seconds ? Time.zone.at(seconds.to_i) : created_at).change(usec: 999_999)
   end
 
   private
@@ -410,6 +458,47 @@ class Message < ApplicationRecord
     update_contact_activity
   end
 
+  # Anything the contact sends, and any receipt from their phone, proves the number has
+  # WhatsApp, so a "no WhatsApp" flag left by an earlier lookup stops warning, as long as the
+  # evidence is newer than that lookup. On every thread of the contact in this inbox, since
+  # the flag is about the phone and a contact can hold more than one (phone and LID). One read
+  # that finds nothing in the usual case.
+  def clear_whatsapp_missing_flag
+    return unless inbox.channel_type == 'Channel::Whatsapp'
+
+    # A lookup still waiting on the provider has no flag here to clear, so the receipt is
+    # also left where that lookup will read it before writing its "no".
+    ContactInbox.remember_whatsapp_receipt(inbox_id, conversation.contact_id, created_at) if outgoing?
+    flagged = ContactInbox.where(inbox_id: inbox_id, contact_id: conversation.contact_id)
+                          .where(whatsapp_missing_checked_at: ...whatsapp_evidence_at)
+    ids = flagged.pluck(:id)
+    return if ids.empty?
+
+    flagged.where(id: ids).update_all(whatsapp_missing_checked_at: nil) # rubocop:disable Rails/SkipsModelValidations
+    # update_all skips the contact inbox's own commit callback, so the rare clear tells the
+    # dashboard itself. This conversation's loaded association still holds the old date, and
+    # this message's own callbacks broadcast it again right after (reopening it,
+    # waiting_since), so it is reloaded first.
+    conversation.reload_contact_inbox
+    ContactInbox.where(id: ids).find_each(&:broadcast_whatsapp_missing_change)
+  end
+
+  # An incoming message counts when it is written. An outgoing one counts only when a
+  # receipt moves it to delivered or read as it happens: an echo of a send from the paired
+  # phone is born delivered without any receipt, and an import replays receipts from the past.
+  def proves_whatsapp_presence?
+    return incoming? if previously_new_record?
+
+    outgoing? && saved_change_to_status? && (delivered? || read?) && !Import::SilentWrite.on?
+  end
+
+  # A message is as old as WhatsApp says it is, which for an imported one is long before the
+  # row was written. A receipt is as old as the message it answers: only one sent after the
+  # lookup surely went to the phone that lookup asked about, since a phone change wipes the
+  # flag and a send to a number with no account never gets a receipt. A late receipt for an
+  # older message is left to the recheck.
+  def whatsapp_evidence_at = incoming? ? whatsapp_sent_at : created_at
+
   def update_contact_activity
     sender.update!(last_activity_at: DateTime.now) if sender.is_a?(Contact)
   end
@@ -455,7 +544,9 @@ class Message < ApplicationRecord
     # if automation rule id is present, it's not a human response
     # if campaign id is present, it's not a human response
     # external echo messages are responses sent from the native app (WhatsApp Business, Instagram)
+    # forwarded emails go to a third party, not to the contact
     outgoing? &&
+      !forwarded? &&
       content_attributes['automation_rule_id'].blank? &&
       additional_attributes['campaign_id'].blank? &&
       (sender.is_a?(User) || content_attributes['external_echo'].present?)
@@ -502,8 +593,26 @@ class Message < ApplicationRecord
     previous_changes.key?('content') && is_edited
   end
 
+  # The row is showing the body a recovery brought, rather than anything written over it since. Absent on
+  # every row no recovery ever filled in, which is what keeps this quiet for an ordinary message.
+  def showing_recovered_body?
+    digest = content_attributes.to_h[RECOVERED_BODY]
+
+    digest.present? && digest == Digest::SHA256.hexdigest(content.to_s)
+  end
+
+  # Named, like every other announcement that speaks of a body, so the listener can tell whether the row
+  # still shows what this is about by the time the work runs.
+  def send_recovered_event
+    Rails.configuration.dispatcher.dispatch(MESSAGE_RECOVERED, Time.zone.now, message: self, content: content)
+  end
+
+  # `content` is the body this announcement speaks of, and the listener only evaluates the rules while the
+  # row is still showing it: the work runs long after the dispatch, and a second edit committing in
+  # between would otherwise have the rules answer about a body this announcement is not about (#660).
   def send_edited_event
-    Rails.configuration.dispatcher.dispatch(MESSAGE_EDITED, Time.zone.now, message: self, performed_by: Current.executed_by,
+    Rails.configuration.dispatcher.dispatch(MESSAGE_EDITED, Time.zone.now, message: self, content: content,
+                                                                           performed_by: Current.executed_by,
                                                                            previous_changes: previous_changes)
   end
 
@@ -517,10 +626,10 @@ class Message < ApplicationRecord
     return if conversation.muted?
     return unless incoming?
     return if reaction?
+    return unless conversation.snoozed? || conversation.resolved?
 
-    conversation.open! if conversation.snoozed?
-
-    reopen_resolved_conversation if conversation.resolved?
+    conversation.check_assignee_team_on_reopen
+    conversation.snoozed? ? conversation.open! : reopen_resolved_conversation
   end
 
   def mark_pending_conversation_as_open_for_human_response
@@ -539,6 +648,7 @@ class Message < ApplicationRecord
   def reopen_resolved_conversation
     # mark resolved bot conversation as pending to be reopened by bot processor service
     if conversation.inbox.active_bot?
+      conversation.hand_reopen_to_agent_bot
       conversation.pending!
     elsif conversation.inbox.api?
       Current.executed_by = sender if reopened_by_contact?

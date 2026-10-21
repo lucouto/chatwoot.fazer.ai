@@ -16,6 +16,7 @@ RSpec.describe Conversation do
     it { is_expected.to belong_to(:contact) }
     it { is_expected.to belong_to(:contact_inbox) }
     it { is_expected.to belong_to(:assignee).optional }
+    it { is_expected.to belong_to(:ai_assignee).optional }
     it { is_expected.to belong_to(:team).optional }
     it { is_expected.to belong_to(:campaign).optional }
   end
@@ -71,6 +72,17 @@ RSpec.describe Conversation do
         .with(described_class::CONVERSATION_CREATED, kind_of(Time), conversation: conversation, notifiable_assignee_change: false,
                                                                     changed_attributes: nil, performed_by: nil)
     end
+
+    it 'marks a visitor contact as a lead' do
+      expect(conversation.contact.reload).to be_lead
+    end
+
+    it 'does not change the contact type of a customer' do
+      customer = create(:contact, account: account, contact_type: :customer)
+      create(:conversation, account: account, contact: customer, inbox: inbox)
+
+      expect(customer.reload).to be_customer
+    end
   end
 
   describe '.validate jsonb attributes' do
@@ -101,6 +113,22 @@ RSpec.describe Conversation do
       error_messages = conversation.errors.messages
       expect(error_messages[:custom_attributes][0]).to eq('company_name length should be < 1500')
       expect(error_messages[:custom_attributes][1]).to eq('contact_number value should be < 9999999999')
+    end
+
+    it 'allows a mail_subject past the generic limit in additional_attributes' do
+      conversation.additional_attributes = { mail_subject: 'a' * 1972 }
+
+      expect(conversation).to be_valid
+    end
+
+    it 'keeps the generic limit for a custom attribute that happens to be named mail_subject' do
+      # The allowance belongs to the mailbox, not to the name: custom_attributes keys are
+      # whatever an operator typed into the UI, and one of them matching by accident must not
+      # widen the payload.
+      conversation.custom_attributes = { mail_subject: 'a' * 1972 }
+      conversation.valid?
+
+      expect(conversation.errors.messages[:custom_attributes][0]).to eq('mail_subject length should be < 1500')
     end
   end
 
@@ -198,7 +226,7 @@ RSpec.describe Conversation do
       conversation = create(:conversation, status: 'open', account: account)
       agent_bot = create(:agent_bot, account: account)
 
-      conversation.update!(assignee_agent_bot: agent_bot)
+      conversation.update!(ai_assignee: agent_bot)
 
       expect(Rails.configuration.dispatcher).to have_received(:dispatch)
         .with(described_class::ASSIGNEE_CHANGED, kind_of(Time), conversation: conversation, notifiable_assignee_change: false,
@@ -460,17 +488,25 @@ RSpec.describe Conversation do
     end
 
     it 'clears agent bot ownership' do
-      conversation.update!(assignee_agent_bot: create(:agent_bot, account: conversation.account))
+      conversation.update!(ai_assignee: create(:agent_bot, account: conversation.account))
 
       conversation.bot_handoff!
 
-      expect(conversation.reload.assignee_agent_bot).to be_nil
+      expect(conversation.reload.ai_assignee).to be_nil
     end
 
     it 'dispatches CONVERSATION_BOT_HANDOFF event' do
       expect(Rails.configuration.dispatcher).to receive(:dispatch)
         .with(described_class::CONVERSATION_BOT_HANDOFF, anything, hash_including(conversation: conversation))
       conversation.bot_handoff!
+    end
+
+    it 'does not hand off or dispatch when the conversation is no longer pending' do
+      conversation.open!
+
+      expect(Rails.configuration.dispatcher).not_to receive(:dispatch)
+      expect(conversation.bot_handoff!).to be(false)
+      expect(conversation.reload.status).to eq('open')
     end
   end
 
@@ -805,7 +841,7 @@ RSpec.describe Conversation do
         contact_last_seen_at: conversation.contact_last_seen_at.to_i,
         agent_last_seen_at: conversation.agent_last_seen_at.to_i,
         created_at: conversation.created_at.to_i,
-        updated_at: conversation.updated_at.to_f,
+        updated_at: described_class.find(conversation.id).updated_at.to_f,
         waiting_since: conversation.waiting_since.to_i,
         priority: nil,
         unread_count: 0,
@@ -841,7 +877,7 @@ RSpec.describe Conversation do
     end
 
     it 'sets connected agent bot as the conversation owner' do
-      expect(conversation.assignee_agent_bot).to eq(bot_inbox.agent_bot)
+      expect(conversation.ai_assignee).to eq(bot_inbox.agent_bot)
       expect(conversation.assignee).to be_nil
     end
 
@@ -850,7 +886,7 @@ RSpec.describe Conversation do
       conversation = create(:conversation, inbox: bot_inbox.inbox, assignee: agent)
 
       expect(conversation.assignee).to eq(agent)
-      expect(conversation.assignee_agent_bot).to be_nil
+      expect(conversation.ai_assignee).to be_nil
     end
 
     context 'with campaigns' do
@@ -860,14 +896,14 @@ RSpec.describe Conversation do
         campaign = create(:campaign, inbox: bot_inbox.inbox, account: bot_inbox.inbox.account, sender: user)
         conversation = create(:conversation, inbox: bot_inbox.inbox, campaign: campaign)
         expect(conversation.status).to eq('open')
-        expect(conversation.assignee_agent_bot).to be_nil
+        expect(conversation.ai_assignee).to be_nil
       end
 
       it 'returns conversation as pending if campaign has no sender (bot-initiated) and bot is active' do
         campaign = create(:campaign, inbox: bot_inbox.inbox, account: bot_inbox.inbox.account, sender: nil)
         conversation = create(:conversation, inbox: bot_inbox.inbox, campaign: campaign)
         expect(conversation.status).to eq('pending')
-        expect(conversation.assignee_agent_bot).to eq(bot_inbox.agent_bot)
+        expect(conversation.ai_assignee).to eq(bot_inbox.agent_bot)
       end
     end
 
@@ -899,7 +935,7 @@ RSpec.describe Conversation do
     end
 
     it 'assigns no agent bot' do
-      expect(conversation.assignee_agent_bot).to be_nil
+      expect(conversation.ai_assignee).to be_nil
     end
 
     it 'reopens as open, not pending, when the contact writes to a resolved conversation' do
@@ -920,7 +956,7 @@ RSpec.describe Conversation do
     end
 
     it 'does not set agent bot ownership' do
-      expect(conversation.assignee_agent_bot).to be_nil
+      expect(conversation.ai_assignee).to be_nil
     end
   end
 
@@ -1021,6 +1057,14 @@ RSpec.describe Conversation do
       it 'returns the list in asc order if asc is passed as sort direction' do
         records = described_class.sort_on_last_activity_at(:asc)
         expect(records.map(&:id)).to eq last_activity_asc_order
+      end
+
+      it 'breaks a last_activity_at tie by id in the sort direction' do
+        conversation_2.update_columns(last_activity_at: conversation_1.last_activity_at) # rubocop:disable Rails/SkipsModelValidations
+        tied = [conversation_1.id, conversation_2.id].sort
+
+        expect(described_class.sort_on_last_activity_at(:asc).map(&:id) & tied).to eq tied
+        expect(described_class.sort_on_last_activity_at(:desc).map(&:id) & tied).to eq tied.reverse
       end
     end
 

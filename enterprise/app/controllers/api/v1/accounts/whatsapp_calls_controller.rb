@@ -3,16 +3,19 @@ class Api::V1::Accounts::WhatsappCallsController < Api::V1::Accounts::BaseContro
   before_action :set_call_context, only: :initiate
   before_action :ensure_calling_enabled, only: :initiate
   before_action :ensure_sdp_offer, only: :initiate
-  before_action :ensure_contact_phone, only: :initiate
+  before_action :ensure_call_recipient, only: :initiate
   before_action :ensure_recording_present, only: :upload_recording
+  before_action :ensure_recording_enabled, only: :upload_recording
   before_action :ensure_call_message, only: :upload_recording
 
   rescue_from Voice::CallErrors::NotRinging,
               Voice::CallErrors::CallFailed,
               with: :render_call_error
+  # A paired phone dials through the connector, which refuses a call the way Meta's API
+  # does, only in its own terms: a number not on WhatsApp, a session that is not connected.
+  rescue_from Whatsapp::Session::Errors::Error, with: :render_call_error
   rescue_from Voice::CallErrors::AlreadyAccepted, with: :render_call_already_accepted
   rescue_from Voice::CallErrors::CallAlreadyEnded, with: :render_call_ended
-  rescue_from Voice::CallErrors::NoCallPermission, with: :render_permission_request
 
   def show; end
 
@@ -42,9 +45,18 @@ class Api::V1::Accounts::WhatsappCallsController < Api::V1::Accounts::BaseContro
       @message = Voice::CallMessageBuilder.new(@call).perform!
       @call.update!(message_id: @message.id)
     end
+    # The connector can report the pickup, or the end, of a call before this request got to
+    # record it; what it said is applied once this tab knows the call.
+    reconcile_connector_call if @inbox.channel.session_provider?
+  rescue Voice::CallErrors::NoCallPermission
+    render_permission_request
   end
 
   private
+
+  def reconcile_connector_call
+    Whatsapp::ConnectorCallReconcileJob.set(wait: Whatsapp::ConnectorCallReconcileJob::DELAY).perform_later(@call.id)
+  end
 
   def call_service
     @call_service ||= Whatsapp::CallService.new(call: @call, agent: Current.user, sdp_answer: params[:sdp_answer])
@@ -102,8 +114,10 @@ class Api::V1::Accounts::WhatsappCallsController < Api::V1::Accounts::BaseContro
     render_could_not_create_error(I18n.t('errors.whatsapp.calls.sdp_offer_required'))
   end
 
-  def ensure_contact_phone
-    return if @contact.phone_number.present?
+  # A group's source id is not a person to dial, and WhatsApp has no group call to place.
+  def ensure_call_recipient
+    return render_could_not_create_error(I18n.t('errors.whatsapp.calls.group_not_supported')) if @conversation&.group_type_group?
+    return if call_recipient.present?
 
     render_could_not_create_error(I18n.t('errors.whatsapp.calls.contact_phone_required'))
   end
@@ -112,6 +126,14 @@ class Api::V1::Accounts::WhatsappCallsController < Api::V1::Accounts::BaseContro
     return if params[:recording].present?
 
     render_could_not_create_error(I18n.t('errors.whatsapp.calls.no_recording'))
+  end
+
+  # The browser gates on this too, but that gate ships in JS: a tab loaded before the setting
+  # changed still has the old bundle, so storage is refused here as well.
+  def ensure_recording_enabled
+    return if @call.recording_enabled?
+
+    render_could_not_create_error(I18n.t('errors.whatsapp.calls.recording_disabled'))
   end
 
   def ensure_call_message
@@ -132,13 +154,33 @@ class Api::V1::Accounts::WhatsappCallsController < Api::V1::Accounts::BaseContro
     # fresh thread (@conversation nil until the dial succeeds) is created already assigned to the caller.
     claim_for_caller = @conversation.present? && @conversation.assigned_entity.nil?
 
-    result = provider_service.initiate_call(@contact.phone_number.delete('+'), params[:sdp_offer])
+    result = provider_service.initiate_call(call_recipient, params[:sdp_offer], **connector_call_context)
     provider_call_id = result.dig('calls', 0, 'id') || result['call_id']
 
     @conversation = open_conversation!
     @conversation.with_lock { @conversation.update!(assignee: Current.user) } if claim_for_caller
 
     create_call_record(provider_call_id)
+  end
+
+  # The connector dials numbers only. The contact panel hands over the contact's number,
+  # which is one; a conversation hands over its bare-digit source id, which the contact
+  # called is what tells apart from a LID's.
+  def connector_call_context
+    return {} unless @inbox.channel.session_provider?
+
+    { contact: @contact, number: params[:conversation_id].blank? }
+  end
+
+  def call_recipient
+    # A conversation is already anchored to the exact WhatsApp identity selected by routing. Use
+    # that source id for the call instead of guessing from the contact, which may contain unrelated
+    # aliases after a dashboard merge. Contact-level calling keeps its existing phone-only behavior.
+    @call_recipient ||= if params[:conversation_id].present?
+                          @conversation.contact_inbox&.source_id
+                        else
+                          @contact.phone_number&.delete('+')
+                        end
   end
 
   def create_call_record(provider_call_id)
@@ -159,7 +201,7 @@ class Api::V1::Accounts::WhatsappCallsController < Api::V1::Accounts::BaseContro
   def render_permission_request
     # Raised mid-dial, so a fresh contact has no thread yet — open one for the opt-in template to land in.
     @conversation = open_conversation!
-    status = Whatsapp::CallPermissionRequestService.new(conversation: @conversation).perform
+    status = Whatsapp::CallPermissionRequestService.new(conversation: @conversation, recipient: call_recipient).perform
 
     return render_could_not_create_error(I18n.t('errors.whatsapp.calls.permission_request_failed')) if status == 'failed'
 

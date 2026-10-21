@@ -25,8 +25,8 @@ module Twilio::WhatsappIdentifierHelper
 
   def twilio_whatsapp_source_ids
     [
-      twilio_whatsapp_phone_source_id,
-      twilio_whatsapp_source_id(params[:ExternalUserId].presence) || twilio_whatsapp_bsuid_source_id,
+      twilio_whatsapp_phone_source_id || twilio_whatsapp_bsuid_source_id,
+      twilio_whatsapp_source_id(params[:ExternalUserId].presence),
       twilio_whatsapp_source_id(params[:ParentExternalUserId].presence)
     ].compact_blank.uniq
   end
@@ -39,6 +39,12 @@ module Twilio::WhatsappIdentifierHelper
     return if phone_number.blank?
 
     Whatsapp::PhoneNumberNormalizationService.new(inbox).normalize_and_find_contact_by_provider("whatsapp:#{phone_number}", :twilio)
+  end
+
+  def twilio_whatsapp_phone_number_candidates
+    return unless twilio_channel.whatsapp? && phone_number.present?
+
+    Whatsapp::PhoneNumberNormalizationService.new(inbox).alternate_contact_phone_numbers(phone_number).presence
   end
 
   def twilio_whatsapp_source_id(identifier)

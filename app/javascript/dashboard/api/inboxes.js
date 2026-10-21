@@ -40,6 +40,16 @@ class Inboxes extends CacheEnabledApiClient {
     }
   }
 
+  // Whether WhatsApp knows this phone, asked through the inbox's paired session.
+  // Answers `{ jid, exists }`. Advisory: the server gives up early rather than hold the
+  // request, since the caller only shows a hint.
+  onWhatsapp(inboxId, phoneNumber) {
+    return axios.post(`${this.url}/${inboxId}/on_whatsapp`, {
+      phone_number: phoneNumber,
+      advisory: true,
+    });
+  }
+
   getCampaigns(inboxId) {
     return axios.get(`${this.url}/${inboxId}/campaigns`);
   }
@@ -143,6 +153,14 @@ class Inboxes extends CacheEnabledApiClient {
     });
   }
 
+  rotateHmacToken(inboxId) {
+    return axios.post(`${this.url}/${inboxId}/rotate_hmac_token`);
+  }
+
+  getWhatsappCallingStatus(inboxId) {
+    return axios.get(`${this.url}/${inboxId}/whatsapp_calling_status`);
+  }
+
   enableWhatsappCalling(inboxId) {
     return axios.post(`${this.url}/${inboxId}/enable_whatsapp_calling`);
   }
@@ -154,6 +172,13 @@ class Inboxes extends CacheEnabledApiClient {
   setInboundCalls(inboxId, enabled) {
     return axios.post(`${this.url}/${inboxId}/set_inbound_calls`, {
       inbound_calls_enabled: enabled,
+    });
+  }
+
+  setCallRecording(inboxId, { recordingEnabled, transcriptionEnabled }) {
+    return axios.post(`${this.url}/${inboxId}/set_call_recording`, {
+      recording_enabled: recordingEnabled,
+      transcription_enabled: transcriptionEnabled,
     });
   }
 }

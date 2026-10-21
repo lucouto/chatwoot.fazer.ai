@@ -33,8 +33,10 @@ class Api::V1::Accounts::Conversations::MessagesController < Api::V1::Accounts::
     message.with_lock do
       # The reserved provider id survives the wipe: a send still in flight is what this delete races
       # with, and dropping the reservation would leave its echo unmatchable — the deleted content
-      # would come back as a fresh incoming-looking message.
-      deleted_attributes = { deleted: true, pending_source_id: message.pending_source_id }.compact
+      # would come back as a fresh incoming-looking message. The forward marker survives too, so
+      # replies to a deleted forward stay out of this conversation.
+      deleted_attributes = message.content_attributes.slice('forwarded_message_id')
+                                  .merge(deleted: true, pending_source_id: message.pending_source_id).compact
       message.update!(content: I18n.t('conversations.messages.deleted'), content_type: :text, content_attributes: deleted_attributes)
       message.attachments.destroy_all
       reached_provider = message.source_id.present?
@@ -54,16 +56,13 @@ class Api::V1::Accounts::Conversations::MessagesController < Api::V1::Accounts::
   def translate
     return head :ok if already_translated_content_available?
 
-    translated_content = Integrations::GoogleTranslate::ProcessorService.new(
-      message: message,
-      target_language: permitted_params[:target_language]
-    ).perform
+    translated_content = translate_message
 
     if translated_content.present?
       translations = {}
       translations[permitted_params[:target_language]] = translated_content
       translations = message.translations.merge!(translations) if message.translations.present?
-      message.update!(translations: translations)
+      message.update!(translations: translations, translation_provider: translation_provider)
     end
 
     render json: { content: translated_content }
@@ -96,12 +95,33 @@ class Api::V1::Accounts::Conversations::MessagesController < Api::V1::Accounts::
 
   private
 
+  def translation_provider
+    'google_translate'
+  end
+
+  def translate_message
+    hook = Current.account.hooks.find_by(app_id: 'google_translate')
+    Integrations::GoogleTranslate::ProcessorService.new(hook: hook).translate_message(message, permitted_params[:target_language]) if hook
+  end
+
   def message
     @message ||= @conversation.messages.find(permitted_params[:id])
   end
 
   def message_finder
     @message_finder ||= MessageFinder.new(@conversation, params)
+  end
+
+  # A retry clears the failure, not what the message is. A pending contact-info request keeps the marker
+  # the eligibility check reads, and a bare retry would send the interactive message with no record of
+  # what it is. An email keeps its recipients, its subject and the forward it carries: without them the
+  # resend would go to the contact as a plain reply.
+  RETRY_KEPT_CONTENT_ATTRIBUTES = %w[forwarded_message_id to_emails cc_emails bcc_emails email].freeze
+
+  def retry_content_attributes
+    return message.content_attributes if message.content_attributes.dig('whatsapp_contact_info', 'type') == 'request'
+
+    message.content_attributes.slice(*RETRY_KEPT_CONTENT_ATTRIBUTES)
   end
 
   def permitted_params
@@ -139,7 +159,7 @@ class Api::V1::Accounts::Conversations::MessagesController < Api::V1::Accounts::
   # Called from inside the claim's lock, so the reset cannot land between a delete and its check.
   def reset_message_state_for_retry
     previous_source_id = message.source_id
-    retry_attributes = { content_attributes: {} }
+    retry_attributes = { content_attributes: retry_content_attributes }
     # An API or web widget inbox owns its source_id: it is the caller's own reference, and the
     # reply job there is an email notification rather than a channel send. On a provider channel
     # a stale id instead makes Base::SendOnChannelService treat the message as already sent.
@@ -163,7 +183,23 @@ class Api::V1::Accounts::Conversations::MessagesController < Api::V1::Accounts::
     else
       message.update!(content: original_content, is_edited: false, previous_content: nil)
     end
+    announce_restored_content
     raise e
+  end
+
+  # The body that came back is the one the contact has, and the rules for it may never have run: the
+  # announcement that named it found this refused body on the row and stood down (#660, #661).
+  # `Message#announce_restored_body` is what decides whether there is anything to say, and it has two
+  # questions to answer rather than one -- a write-back that undid a first edit takes the edit marker with
+  # it and announces no edit, and yet the body it put back may be one a recovery brought and nobody ever
+  # asked the arrival rules about (#666).
+  #
+  # Swallowed on purpose. The channel's own error is the one the agent needs to see, and replacing it with
+  # one about the job transport would cost them the reason their edit did not go out.
+  def announce_restored_content
+    message.announce_restored_body
+  rescue StandardError => e
+    Rails.logger.error "Failed to announce the restored content: #{e.message}"
   end
 
   # API inbox check
@@ -179,3 +215,5 @@ class Api::V1::Accounts::Conversations::MessagesController < Api::V1::Accounts::
     Rails.configuration.dispatcher.dispatch(event, Time.zone.now, conversation: @conversation, user: user, is_private: params[:private])
   end
 end
+
+Api::V1::Accounts::Conversations::MessagesController.prepend_mod_with('Api::V1::Accounts::Conversations::MessagesController')

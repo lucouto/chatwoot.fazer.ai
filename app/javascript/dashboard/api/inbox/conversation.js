@@ -9,19 +9,23 @@ class ConversationApi extends ApiClient {
     super('conversations', { accountScoped: true });
   }
 
-  get({
-    inboxId,
-    status,
-    assigneeType,
-    page,
-    labels,
-    teamId,
-    conversationType,
-    sortBy,
-    updatedWithin,
-    groupType,
-  }) {
+  get(
+    {
+      inboxId,
+      status,
+      assigneeType,
+      page,
+      labels,
+      teamId,
+      conversationType,
+      sortBy,
+      updatedWithin,
+      groupType,
+    },
+    options = {}
+  ) {
     return axios.get(this.url, {
+      signal: options.signal,
       params: {
         inbox_id: inboxId,
         team_id: teamId,
@@ -37,14 +41,12 @@ class ConversationApi extends ApiClient {
     });
   }
 
-  filter(payload) {
+  filter(payload, options = {}) {
     return axios.post(`${this.url}/filter`, payload.queryData, {
+      signal: options.signal,
       params: {
         page: payload.page,
-        // Sent as a query param, not in the body: the body is the filter payload the
-        // server validates attribute by attribute, and an extra key there is rejected
-        // rather than ignored. Omitted when absent so the server keeps its own default.
-        ...(payload.sortBy ? { sort_by: payload.sortBy } : {}),
+        sort_by: payload.sortBy,
       },
     });
   }
@@ -69,6 +71,13 @@ class ConversationApi extends ApiClient {
   // the webhook minutes later, or never, so there is nothing useful in the response.
   syncHistory(conversationId) {
     return axios.post(`${this.url}/${conversationId}/sync_history`);
+  }
+
+  // Asks again whether a number flagged as having no WhatsApp has registered since. The
+  // server only goes to the provider when the flag is older than its recheck window, and
+  // the answer arrives as a conversation update.
+  recheckWhatsappNumber(conversationId) {
+    return axios.post(`${this.url}/${conversationId}/recheck_whatsapp_number`);
   }
 
   togglePriority({ conversationId, priority }) {
@@ -182,6 +191,16 @@ class ConversationApi extends ApiClient {
 
   sendEmailTranscript({ conversationId, email }) {
     return axios.post(`${this.url}/${conversationId}/transcript`, { email });
+  }
+
+  getContactInfoRequestAvailability(conversationId, { signal } = {}) {
+    return axios.get(`${this.url}/${conversationId}/contact_info_request`, {
+      signal,
+    });
+  }
+
+  requestContactInfo(conversationId) {
+    return axios.post(`${this.url}/${conversationId}/contact_info_request`);
   }
 
   updateCustomAttributes({ conversationId, customAttributes }) {

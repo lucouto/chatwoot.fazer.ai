@@ -108,3 +108,4 @@ Procfile.worktree
 graphify-out/
 ARCHIVE_old_*.tgz
 .gstack/
+.nodeterm/project.json

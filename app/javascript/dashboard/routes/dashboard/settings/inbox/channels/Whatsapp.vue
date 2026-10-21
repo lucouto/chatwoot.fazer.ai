@@ -5,11 +5,14 @@ import { useI18n, I18nT } from 'vue-i18n';
 import Twilio from './Twilio.vue';
 import ThreeSixtyDialogWhatsapp from './360DialogWhatsapp.vue';
 import CloudWhatsapp from './CloudWhatsapp.vue';
+import WhatsappManualSetup from './WhatsappManualSetup.vue';
 import WhatsappEmbeddedSignup from './WhatsappEmbeddedSignup.vue';
+import WhatsappAccessRequestDialog from '../components/WhatsappAccessRequestDialog.vue';
 import ChannelSelector from 'dashboard/components/ChannelSelector.vue';
 import BaileysWhatsapp from './BaileysWhatsapp.vue';
 import ZapiWhatsapp from './ZapiWhatsapp.vue';
 import SessionWhatsapp from './session/SessionWhatsapp.vue';
+import WhatsappLegacyProviderBanner from '../components/WhatsappLegacyProviderBanner.vue';
 import Banner from 'dashboard/components-next/banner/Banner.vue';
 import Button from 'dashboard/components-next/button/Button.vue';
 import Icon from 'dashboard/components-next/icon/Icon.vue';
@@ -35,6 +38,7 @@ const isConvertMode = computed(() => props.mode === 'convert');
 const route = useRoute();
 const router = useRouter();
 const { t } = useI18n();
+const accessRequestDialogRef = ref(null);
 const {
   isCloudFeatureEnabled,
   isOnChatwootCloud,
@@ -130,6 +134,10 @@ const shouldShowEmbeddedSignupAccessRequest = computed(() => {
 });
 
 const PROVIDER_CATALOG = computed(() => [
+  // The order the picker shows them in: the official API first, then the connection by QR
+  // code on the installation's own server, the other official route, the paid QR APIs, and
+  // the frozen Baileys last. Providers the server does not offer drop out without moving
+  // the rest.
   {
     key: PROVIDER_TYPES.WHATSAPP,
     title: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.WHATSAPP_CLOUD'),
@@ -139,16 +147,22 @@ const PROVIDER_CATALOG = computed(() => [
     icon: 'i-woot-whatsapp',
   },
   {
+    key: PROVIDER_TYPES.NATIVE,
+    title: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.NATIVE'),
+    description: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.NATIVE_DESC'),
+    icon: 'i-woot-whatsapp-native',
+  },
+  {
     key: PROVIDER_TYPES.TWILIO,
     title: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.TWILIO'),
     description: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.TWILIO_DESC'),
     icon: 'i-woot-twilio',
   },
   {
-    key: PROVIDER_TYPES.BAILEYS,
-    title: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.BAILEYS'),
-    description: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.BAILEYS_DESC'),
-    icon: 'i-woot-baileys',
+    key: PROVIDER_TYPES.UAZAPI,
+    title: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.UAZAPI'),
+    description: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.UAZAPI_DESC'),
+    icon: 'i-woot-uazapi',
   },
   {
     key: PROVIDER_TYPES.ZAPI,
@@ -157,16 +171,10 @@ const PROVIDER_CATALOG = computed(() => [
     icon: 'i-woot-zapi',
   },
   {
-    key: PROVIDER_TYPES.NATIVE,
-    title: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.NATIVE'),
-    description: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.NATIVE_DESC'),
-    icon: 'i-woot-whatsapp-native',
-  },
-  {
-    key: PROVIDER_TYPES.UAZAPI,
-    title: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.UAZAPI'),
-    description: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.UAZAPI_DESC'),
-    icon: 'i-woot-uazapi',
+    key: PROVIDER_TYPES.BAILEYS,
+    title: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.BAILEYS'),
+    description: t('INBOX_MGMT.ADD.WHATSAPP.PROVIDERS.BAILEYS_DESC'),
+    icon: 'i-woot-baileys',
   },
   {
     key: PROVIDER_TYPES.THREE_SIXTY_DIALOG,
@@ -205,6 +213,8 @@ const selectedDescriptor = computed(() =>
 // rather than a literal in the label: ending the beta is one field on the descriptor.
 // The cloud providers have no descriptor here and answer false, which is what they are.
 const isBetaProvider = key => Boolean(descriptorFor(key)?.beta);
+// Legacy the same way: the catalog says so, and a provider's withdrawal is a server change.
+const isLegacyProvider = key => Boolean(descriptorFor(key)?.legacy);
 
 const availableProviders = computed(() => {
   const allowed = [
@@ -215,6 +225,13 @@ const availableProviders = computed(() => {
     .filter(p => allowed.includes(p.key))
     .filter(p => !isConvertMode.value || p.key !== currentProviderKey.value);
 });
+
+// What this screen could actually open, not only what the catalog offers the account: a
+// conversion leaves out the inbox's own provider, so a native inbox being converted to a
+// legacy one has no native target to recommend.
+const isNativeAvailable = computed(() =>
+  availableProviders.value.some(({ key }) => key === PROVIDER_TYPES.NATIVE)
+);
 
 const currentProviderLabel = computed(() => {
   if (!isConvertMode.value || !currentProviderKey.value) return '';
@@ -273,18 +290,93 @@ const shouldShowCloudWhatsapp = provider => {
   );
 };
 
+const isManualSetup = computed(
+  () =>
+    showConfiguration.value && shouldShowCloudWhatsapp(selectedProvider.value)
+);
+
 const handleManualLinkClick = () => {
   selectProvider(PROVIDER_TYPES.WHATSAPP_MANUAL);
 };
 
 const requestEmbeddedSignupAccess = () => {
-  window.$chatwoot?.toggle();
+  accessRequestDialogRef.value.open();
 };
 </script>
 
 <template>
-  <div class="overflow-auto col-span-6 p-6 w-full h-full">
-    <div v-if="showProviderSelection">
+  <div class="col-span-6 w-full h-full min-h-0 overflow-y-auto p-6">
+    <WhatsappAccessRequestDialog ref="accessRequestDialogRef" />
+    <div v-if="isManualSetup">
+      <div
+        v-if="shouldShowEmbeddedSignupAccessRequest"
+        class="w-full p-5 mb-6 border rounded-xl border-n-weak bg-n-surface-2 text-start"
+      >
+        <div class="flex flex-wrap items-center gap-3">
+          <div
+            class="flex items-center justify-center flex-shrink-0 rounded-lg size-7 bg-n-slate-3"
+          >
+            <Icon icon="i-woot-whatsapp" class="size-5 text-n-slate-11" />
+          </div>
+          <span class="flex-1 min-w-0 text-heading-2 text-n-slate-12">
+            {{
+              $t('INBOX_MGMT.ADD.WHATSAPP.EMBEDDED_SIGNUP.ACCESS_REQUEST.TITLE')
+            }}
+          </span>
+          <Button
+            solid
+            blue
+            sm
+            class="flex-shrink-0"
+            icon="i-lucide-life-buoy"
+            :label="
+              $t(
+                'INBOX_MGMT.ADD.WHATSAPP.EMBEDDED_SIGNUP.ACCESS_REQUEST.BUTTON'
+              )
+            "
+            @click="requestEmbeddedSignupAccess"
+          />
+        </div>
+        <p class="mt-2 ms-10 max-w-3xl text-body-main text-n-slate-11">
+          {{
+            $t(
+              'INBOX_MGMT.ADD.WHATSAPP.EMBEDDED_SIGNUP.ACCESS_REQUEST.DESCRIPTION'
+            )
+          }}
+        </p>
+      </div>
+      <Banner
+        v-if="
+          isWhatsappEmbeddedSignupDisabled &&
+          selectedProvider === PROVIDER_TYPES.WHATSAPP_MANUAL
+        "
+        color="amber"
+        class="w-full mb-6"
+      >
+        <div class="flex items-start gap-3 text-start">
+          <Icon
+            icon="i-lucide-triangle-alert"
+            class="flex-shrink-0 size-4 mt-0.5"
+          />
+          <span>
+            {{ $t('INBOX_MGMT.ADD.WHATSAPP.API.MANUAL_RESTRICTION_WARNING') }}
+            <a
+              :href="META_RESTRICTION_STATUS_URL"
+              class="link underline"
+              rel="noopener noreferrer nofollow"
+              target="_blank"
+            >
+              {{ $t('INBOX_MGMT.ADD.WHATSAPP.API.STATUS_LINK') }}
+            </a>
+          </span>
+        </div>
+      </Banner>
+      <!-- The guided setup creates an inbox. Converting keeps the fork's form, which knows the inbox it is converting. -->
+      <CloudWhatsapp v-if="isConvertMode" :mode="mode" :inbox="inbox" />
+      <WhatsappManualSetup v-else />
+    </div>
+
+    <div v-else-if="showProviderSelection">
       <div class="mb-10 text-left">
         <h1 class="mb-2 text-lg font-medium text-n-slate-12">
           {{
@@ -315,12 +407,19 @@ const requestEmbeddedSignupAccess = () => {
           :description="provider.description"
           :icon="provider.icon"
           :is-beta="isBetaProvider(provider.key)"
+          :is-legacy="isLegacyProvider(provider.key)"
           @click="selectProvider(provider.key)"
         />
       </div>
     </div>
 
     <div v-else-if="showConfiguration">
+      <WhatsappLegacyProviderBanner
+        v-if="isLegacyProvider(selectedProvider)"
+        :native-available="isNativeAvailable"
+        class="mb-4"
+        @use-native="selectProvider(PROVIDER_TYPES.NATIVE)"
+      />
       <div class="px-6 py-5 rounded-2xl border border-n-weak">
         <!-- Show embedded signup if app ID is configured -->
         <div v-if="shouldShowWhatsappEmbeddedSignup">
@@ -355,84 +454,6 @@ const requestEmbeddedSignupAccess = () => {
               </template>
             </I18nT>
           </div>
-        </div>
-
-        <!-- Show manual setup -->
-        <div v-else-if="shouldShowCloudWhatsapp(selectedProvider)">
-          <div
-            v-if="shouldShowEmbeddedSignupAccessRequest"
-            class="w-full p-4 mb-6 border rounded-xl border-n-weak bg-n-solid-2"
-          >
-            <div class="flex flex-col gap-4 sm:flex-row sm:items-start">
-              <div
-                class="flex items-center justify-center flex-shrink-0 rounded-lg size-9 bg-n-blue-3"
-              >
-                <Icon icon="i-woot-whatsapp" class="size-5 text-n-slate-10" />
-              </div>
-              <div class="flex-1 min-w-0 text-start">
-                <div class="font-medium text-n-slate-12">
-                  {{
-                    $t(
-                      'INBOX_MGMT.ADD.WHATSAPP.EMBEDDED_SIGNUP.ACCESS_REQUEST.TITLE'
-                    )
-                  }}
-                </div>
-                <p class="mt-1 text-sm leading-5 text-n-slate-11">
-                  {{
-                    $t(
-                      'INBOX_MGMT.ADD.WHATSAPP.EMBEDDED_SIGNUP.ACCESS_REQUEST.DESCRIPTION'
-                    )
-                  }}
-                </p>
-                <p class="mt-2 text-xs leading-5 text-n-slate-10">
-                  {{
-                    $t(
-                      'INBOX_MGMT.ADD.WHATSAPP.EMBEDDED_SIGNUP.ACCESS_REQUEST.FOOTNOTE'
-                    )
-                  }}
-                </p>
-              </div>
-              <Button
-                solid
-                blue
-                sm
-                class="self-start flex-shrink-0 sm:mt-0.5"
-                icon="i-lucide-life-buoy"
-                :label="
-                  $t(
-                    'INBOX_MGMT.ADD.WHATSAPP.EMBEDDED_SIGNUP.ACCESS_REQUEST.BUTTON'
-                  )
-                "
-                @click="requestEmbeddedSignupAccess"
-              />
-            </div>
-          </div>
-          <Banner
-            v-if="isWhatsappEmbeddedSignupDisabled"
-            color="amber"
-            class="w-full mb-6"
-          >
-            <div class="flex items-start gap-3 text-start">
-              <Icon
-                icon="i-lucide-triangle-alert"
-                class="flex-shrink-0 size-4 mt-0.5"
-              />
-              <span>
-                {{
-                  $t('INBOX_MGMT.ADD.WHATSAPP.API.MANUAL_RESTRICTION_WARNING')
-                }}
-                <a
-                  :href="META_RESTRICTION_STATUS_URL"
-                  class="link underline"
-                  rel="noopener noreferrer nofollow"
-                  target="_blank"
-                >
-                  {{ $t('INBOX_MGMT.ADD.WHATSAPP.API.STATUS_LINK') }}
-                </a>
-              </span>
-            </div>
-          </Banner>
-          <CloudWhatsapp :mode="mode" :inbox="inbox" />
         </div>
 
         <!-- Other providers -->

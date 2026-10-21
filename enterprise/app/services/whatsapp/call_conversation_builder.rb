@@ -2,7 +2,7 @@ class Whatsapp::CallConversationBuilder
   pattr_initialize [:inbox!, :contact!, :user!]
 
   # Mirrors the continuity rule in Whatsapp::IncomingMessageBaseService#set_conversation.
-  # Locked inboxes hold a contact to one thread, so the caller is refused rather than given a second one.
+  # Locked inboxes hold each WhatsApp identity to one thread.
   def existing_conversation
     return contact_conversations.first if inbox.lock_to_single_conversation
 
@@ -12,8 +12,15 @@ class Whatsapp::CallConversationBuilder
     ).perform.first
   end
 
+  # A paired phone files one person under its LID and its number in the same inbox, and its
+  # inbound messages follow the contact across both (Whatsapp::Session::Inbound::ConversationFinder),
+  # so a call matched on the number alone would open a second thread beside the LID's.
   def contact_conversations
-    inbox.conversations.where(contact_id: contact.id).order(last_activity_at: :desc)
+    scope = inbox.conversations.where(contact_id: contact.id)
+    unless inbox.channel.try(:session_provider?)
+      scope = scope.joins(:contact_inbox).where(contact_inboxes: { source_id: contact.phone_number&.delete('+') })
+    end
+    scope.order(last_activity_at: :desc)
   end
 
   # Unsaved, so callers can authorize the thread a call would open before dialing.
@@ -25,8 +32,11 @@ class Whatsapp::CallConversationBuilder
   def perform!
     contact_inbox = ContactInboxBuilder.new(contact: contact, inbox: inbox).perform
 
-    contact_inbox.with_lock do
-      existing_conversation || new_conversation.tap { |conversation| conversation.update!(contact_inbox: contact_inbox) }
+    conversation = contact_inbox.with_lock do
+      existing_conversation || new_conversation.tap { |record| record.update!(contact_inbox: contact_inbox) }
     end
+
+    # Preserve assignment changes through commit callbacks before clearing trigger-populated attributes.
+    conversation.tap { |record| record.reload if record.changed? }
   end
 end

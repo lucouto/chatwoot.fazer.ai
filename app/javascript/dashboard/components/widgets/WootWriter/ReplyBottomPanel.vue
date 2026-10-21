@@ -8,6 +8,7 @@ import inboxMixin from 'shared/mixins/inboxMixin';
 import { FEATURE_FLAGS } from 'dashboard/featureFlags';
 import { getAllowedFileTypesByChannel } from '@chatwoot/utils';
 import VideoCallButton from '../VideoCallButton.vue';
+import RequestContactInfoButton from '../RequestContactInfoButton.vue';
 import { INBOX_TYPES } from 'dashboard/helper/inbox';
 import { mapGetters } from 'vuex';
 import NextButton from 'dashboard/components-next/button/Button.vue';
@@ -26,6 +27,7 @@ export default {
     DropdownBody,
     DropdownSection,
     DropdownItem,
+    RequestContactInfoButton,
   },
   mixins: [inboxMixin],
   props: {
@@ -125,14 +127,6 @@ export default {
       type: String,
       default: '',
     },
-    showQuotedReplyToggle: {
-      type: Boolean,
-      default: false,
-    },
-    quotedReplyEnabled: {
-      type: Boolean,
-      default: false,
-    },
     isEditorDisabled: {
       type: Boolean,
       default: false,
@@ -146,8 +140,8 @@ export default {
     'toggleInsertArticle',
     'selectWhatsappTemplate',
     'selectContentTemplate',
-    'toggleQuotedReply',
     'scheduleMessage',
+    'requestContactInfoTemplate',
   ],
   setup(props) {
     const { setSignatureFlagForInbox, fetchSignatureFlagFromUISettings } =
@@ -277,11 +271,6 @@ export default {
     isFetchingAppIntegrations() {
       return this.uiFlags.isFetching;
     },
-    quotedReplyToggleTooltip() {
-      return this.quotedReplyEnabled
-        ? this.$t('CONVERSATION.REPLYBOX.QUOTED_REPLY.DISABLE_TOOLTIP')
-        : this.$t('CONVERSATION.REPLYBOX.QUOTED_REPLY.ENABLE_TOOLTIP');
-    },
   },
   mounted() {
     ActiveStorage.start();
@@ -365,16 +354,6 @@ export default {
         @click="toggleMessageSignature"
       />
       <NextButton
-        v-if="showQuotedReplyToggle"
-        v-tooltip.top-end="quotedReplyToggleTooltip"
-        icon="i-ph-quotes"
-        :variant="quotedReplyEnabled ? 'solid' : 'faded'"
-        color="slate"
-        sm
-        :aria-pressed="quotedReplyEnabled"
-        @click="$emit('toggleQuotedReply')"
-      />
-      <NextButton
         v-if="enableWhatsAppTemplates"
         v-tooltip.top-end="$t('CONVERSATION.FOOTER.WHATSAPP_TEMPLATES')"
         icon="i-ph-whatsapp-logo"
@@ -382,6 +361,10 @@ export default {
         faded
         sm
         @click="$emit('selectWhatsappTemplate')"
+      />
+      <RequestContactInfoButton
+        v-if="!isOnPrivateNote"
+        @request-template="$emit('requestContactInfoTemplate')"
       />
       <NextButton
         v-if="enableContentTemplates"

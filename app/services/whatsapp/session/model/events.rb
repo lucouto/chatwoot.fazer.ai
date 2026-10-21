@@ -225,17 +225,9 @@ module Whatsapp::Session::Model::Events
     coerce groups: [Address]
   end
 
-  class AccountReachoutTimelock < Data.define(:reachout_time_lock)
-    include Serializable
-    wire_type 'account.reachout_timelock'
-  end
-
-  class AccountNewChatCap < Data.define(:new_chat_cap)
-    include Serializable
-    wire_type 'account.new_chat_cap'
-  end
-
-  class CallOffer < Data.define(:call_id, :from, :video, :timestamp)
+  # `sdp` is the connector's WebRTC offer, present only on a 1:1 voice call of a session
+  # connected with `calls.answer`: it is what lets the browser answer the call.
+  class CallOffer < Data.define(:call_id, :from, :video, :timestamp, :sdp)
     include Serializable
     wire_type 'call.offer'
     coerce from: Party
@@ -246,6 +238,13 @@ module Whatsapp::Session::Model::Events
     include Serializable
     wire_type 'call.terminate'
     coerce from: Party
+  end
+
+  # The callee picked up a call placed with `call.start`; `sdp` is the connector's WebRTC
+  # answer for the browser.
+  class CallAnswered < Data.define(:call_id, :sdp)
+    include Serializable
+    wire_type 'call.answered'
   end
 
   class HistorySync < Data.define(:kind, :progress, :data)
@@ -272,8 +271,8 @@ module Whatsapp::Session::Model::Events
     PairingQr, PairingCode, PairingSuccess, PairingError, PairingPasskeyRequest,
     PairingPasskeyConfirmation, MessageReceived, MessageReceipt, MessageEdited, MessageRevoked, MessageReaction,
     MediaDownloadFailed, CommandFailed, ChatPresence, PresenceUpdate, ContactPictureChanged, ContactIdentityChanged,
-    GroupJoined, GroupUpdated, GroupPictureChanged, GroupActivity, AccountReachoutTimelock, AccountNewChatCap,
-    CallOffer, CallTerminate, HistorySync, Raw
+    GroupJoined, GroupUpdated, GroupPictureChanged, GroupActivity,
+    CallOffer, CallTerminate, CallAnswered, HistorySync, Raw
   ].freeze
 
   BY_TYPE = CLASSES.index_by(&:wire_type).freeze

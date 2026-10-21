@@ -16,6 +16,30 @@ RSpec.describe Whatsapp::Session::MediaFetchJob do
 
   before { allow(Whatsapp::Session::Registry).to receive(:backend_for).and_return(backend) }
 
+  it 'turns an imported placeholder back into the file once its bytes arrive' do
+    message.update!(content_attributes: { 'is_unsupported' => true, 'history_media' => true, 'imported' => true })
+
+    described_class.perform_now(message, media.to_h)
+
+    message.reload
+    expect(message.attachments.first).to have_attributes(file_type: 'image')
+    expect(message.content_attributes).not_to include('is_unsupported', 'history_media')
+    expect(message.content_attributes['imported']).to be(true)
+  end
+
+  # The provider has just said these bytes are not coming, so a later delivery of the same
+  # message must not ask again.
+  it 'stops an imported placeholder waiting once the provider gives up on its bytes' do
+    message.update!(content_attributes: { 'is_unsupported' => true, 'history_media' => true })
+    allow(backend).to receive(:download_media).and_raise(Whatsapp::Session::Errors::MediaUnavailable, 'gone')
+
+    described_class.perform_now(message, media.to_h)
+
+    expect(message.reload.content_attributes).to include('is_unsupported' => true)
+    expect(message.content_attributes).not_to include('history_media')
+    expect(Whatsapp::Session::Inbound::MessageAttributes.given_up?(message)).to be(true)
+  end
+
   it 'attaches the bytes it downloaded' do
     described_class.perform_now(message, media.to_h)
 
@@ -26,13 +50,13 @@ RSpec.describe Whatsapp::Session::MediaFetchJob do
   # one, so a chat rebuilt from the contact addresses a refresh to a chat the message
   # does not live in, and the provider answers that it cannot find it.
   it 'asks with the chat the event carried, not one rebuilt from the contact' do
-    conversation.contact.update!(identifier: '167392323834034@lid')
-    chat = model::Address.phone('553499503261')
+    conversation.contact.update!(identifier: '100000000000001@lid')
+    chat = model::Address.phone('553499990001')
 
     described_class.perform_now(message, media.to_h, chat.to_h)
 
     command = backend.commands.last
-    expect(command.chat.to_jid).to eq('553499503261@s.whatsapp.net')
+    expect(command.chat.to_jid).to eq('553499990001@s.whatsapp.net')
     expect(command.message_id).to eq('3EB0AAAA0001')
   end
 

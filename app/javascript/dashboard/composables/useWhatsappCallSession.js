@@ -1,7 +1,10 @@
 import { readonly, ref } from 'vue';
 import Cookies from 'js-cookie';
 import WhatsappCallsAPI from 'dashboard/api/channel/whatsapp/whatsappCallsAPI';
+import { remuxWebmToOgg } from 'dashboard/components/widgets/WootWriter/utils/webmOpusToOgg';
 import { VOICE_CALL_OUTBOUND_INIT_STATUS } from 'dashboard/components-next/message/constants';
+import { useCallsStore } from 'dashboard/stores/calls';
+import { markCallDismissed } from 'dashboard/helper/voice';
 
 // Module-level state lets the cable handlers and unload listeners reach the
 // live PeerConnection without prop-drilling refs through every composable.
@@ -13,6 +16,8 @@ let mediaRecorder = null;
 let recorderChunks = [];
 let audioContext = null;
 let activeCallId = null;
+// The provider's id of the call this tab placed, which is what a late ringing message names.
+let activeCallSid = null;
 // voice_call.outbound_connected (the sole source of the outbound SDP answer) is
 // broadcast account-wide and can arrive before the /initiate response sets
 // activeCallId in this tab. Until we know our own call id we can't tell our
@@ -20,6 +25,11 @@ let activeCallId = null;
 // by call id (a single slot would let a concurrent agent's event clobber ours)
 // and initiateOutboundCall flushes the matching one by id.
 const pendingOutboundAnswers = new Map();
+// The pickup and the end of a placed call are broadcast too, and on a paired phone they
+// can arrive before this tab has the call in its store: the connector answers the dial as
+// soon as the phone rings. They are kept here by call id, like the answers above, and
+// applied by the calls store when the call is added (takeEarlyOutboundOutcome).
+const earlyOutboundOutcomes = new Map();
 // Module-scoped so multiple composable callers (header button + contact-panel
 // button) share the same lock. A per-instance ref let two parallel callers
 // both pass the guard and tear down each other's WebRTC state in cleanup().
@@ -33,6 +43,9 @@ const isInitiatingOutboundReadonly = readonly(isInitiatingOutbound);
 // answers, and we don't want pre-pickup audio in the recording. This flag is
 // flipped to true by armOutboundRecorder() when the ACCEPTED status arrives.
 let recorderArmed = false;
+// This call's recording decision, snapshotted server-side at call creation and
+// carried on every payload that can start a call in this tab.
+let callRecordingEnabled = true;
 
 const ensureRemoteAudioElement = () => {
   if (remoteAudioEl) return remoteAudioEl;
@@ -58,6 +71,10 @@ const playRemoteStream = stream => {
 // that races cleanup still has data to upload.
 const RECORDING_TIMESLICE_MS = 1000;
 const ICE_GATHER_TIMEOUT_MS = 10000;
+// The OGG remux is a whole-file in-memory pass on the main thread (~4x the
+// blob size transient); past this cap (~3 h at the 48 kbps recording bitrate)
+// skip it and upload the raw WebM instead.
+const MAX_REMUX_BYTES = 64 * 1024 * 1024;
 
 const RECORDER_MIME_CANDIDATES = [
   'audio/webm;codecs=opus',
@@ -86,6 +103,7 @@ const waitForIceGatheringComplete = peer =>
   });
 
 const setupRecorder = () => {
+  if (!callRecordingEnabled) return;
   if (!localStream || !remoteStream || mediaRecorder) return;
   // createMediaStreamSource on a stream with no audio tracks wires up to
   // nothing — the recorded mix would be silence. Wait until ontrack fires.
@@ -106,7 +124,11 @@ const setupRecorder = () => {
   if (!mimeType) return;
 
   recorderChunks = [];
-  mediaRecorder = new MediaRecorder(destination.stream, { mimeType });
+  // 48 kbps Opus is transparent for speech vs Chrome's ~128 kbps default.
+  mediaRecorder = new MediaRecorder(destination.stream, {
+    mimeType,
+    audioBitsPerSecond: 48000,
+  });
   mediaRecorder.ondataavailable = event => {
     if (event.data && event.data.size > 0) recorderChunks.push(event.data);
   };
@@ -130,14 +152,21 @@ const cleanup = () => {
   if (remoteAudioEl) remoteAudioEl.srcObject = null;
 
   pc = null;
+  // Outcomes are kept through a teardown: an end that tore the session down while the
+  // dial was still being answered is what keeps the call it placed from being added
+  // back as ringing. A new dial starts them over.
   localStream = null;
   remoteStream = null;
   mediaRecorder = null;
+  callRecordingEnabled = true;
   recorderChunks = [];
   audioContext = null;
   activeCallId = null;
+  activeCallSid = null;
   pendingOutboundAnswers.clear();
   recorderArmed = false;
+  // eslint-disable-next-line no-use-before-define
+  stopRingingTimer();
 };
 
 const buildPeerConnection = iceServers => {
@@ -161,9 +190,117 @@ const buildPeerConnection = iceServers => {
     // own click (acceptIncomingCall flips recorderArmed before returning).
     if (recorderArmed) setupRecorder();
   };
+  // A transport that failed carries nothing more, and the provider may never say the call
+  // ended: a paired phone's connector hangs up a call it can no longer carry without
+  // always reaching the client.
+  const own = pc;
+  own.onconnectionstatechange = () => {
+    if (own !== pc || own.connectionState !== 'failed' || !activeCallId) return;
+    // eslint-disable-next-line no-use-before-define
+    letGoOfCall(activeCallId, activeCallSid);
+  };
   return pc;
 };
 
+// A call this tab can no longer expect to hear the end of. The end is asked for, as an
+// agent hanging up would, and this tab lets go of the call itself without waiting on that
+// request: the end broadcast is not replayed to a tab whose cable was down, a failed
+// request sends none, and one that hangs would hold the microphone for as long as it
+// does. The recording is uploaded, the session released and the card removed, once,
+// however many of these and the broadcast arrive.
+const letGoOfCall = (callId, placedSid) => {
+  // Kept before the teardown, as an end broadcast keeps it: a dial still applying its
+  // answer returns this call afterwards, and must not have it added back as ringing.
+  // eslint-disable-next-line no-use-before-define
+  noteEarlyOutboundOutcome(callId, 'ended');
+  WhatsappCallsAPI.terminate(callId).catch(() => {});
+  // eslint-disable-next-line no-use-before-define
+  return handleWhatsappRemoteEnd(callId)
+    .catch(() => {})
+    .then(() => {
+      const store = useCallsStore();
+      const card = store.calls.find(c => c.callId === callId);
+      // Dismissed as an end broadcast would, so a ringing message still queued for the
+      // call does not add it back.
+      markCallDismissed(card?.callSid || placedSid);
+      if (card) store.removeCall(card.callSid);
+    });
+};
+
+// WhatsApp stops ringing an unanswered call well within this. A placed call still
+// ringing past it lost its end on the way: a paired phone's connector that lost its
+// session ends its calls without always reaching the client, and before the callee
+// answers there is no transport yet whose failure would say so.
+export const OUTBOUND_RINGING_LIMIT_MS = 90 * 1000;
+let ringingTimer = null;
+export const CALL_STATUS_LOOKUP_LIMIT_MS = 10 * 1000;
+
+const stopRingingTimer = () => {
+  if (ringingTimer) clearTimeout(ringingTimer);
+  ringingTimer = null;
+};
+
+const startRingingTimer = (callId, placedSid) => {
+  stopRingingTimer();
+  ringingTimer = setTimeout(async () => {
+    ringingTimer = null;
+    if (activeCallId !== callId) return;
+    // The pickup broadcast can be what was lost, on a cable that dropped after the answer
+    // got through: the call is asked about before it is taken for unanswered.
+    // Bounded: a request that hangs would leave the call it is about holding the microphone.
+    let status = null;
+    try {
+      ({ status } = await Promise.race([
+        WhatsappCallsAPI.show(callId),
+        new Promise((_, reject) => {
+          setTimeout(reject, CALL_STATUS_LOOKUP_LIMIT_MS);
+        }),
+      ]));
+    } catch (_) {
+      /* unreachable as well, or too slow to say: nothing says the call is up */
+    }
+    // A pickup that arrived, answer applied, while the call was being asked about.
+    if (activeCallId !== callId || (recorderArmed && pc?.remoteDescription))
+      return;
+    // Up on WhatsApp is only a call here once its answer was applied: without one there is
+    // no media, and no transport whose failure would ever report the call lost.
+    if (status === 'in-progress' && pc?.remoteDescription) {
+      const store = useCallsStore();
+      const card = store.calls.find(c => c.callId === callId);
+      if (card) store.setCallActive(card.callSid);
+      // eslint-disable-next-line no-use-before-define
+      armOutboundRecorder();
+      return;
+    }
+    letGoOfCall(callId, placedSid);
+  }, OUTBOUND_RINGING_LIMIT_MS);
+};
+
+const uploadRecording = async (callId, chunks) => {
+  let blob = new Blob(chunks, { type: chunks[0].type });
+  const isWebm = blob.type.startsWith('audio/webm');
+  let filename = isWebm ? 'call-recording.webm' : 'call-recording.ogg';
+  // Remux to OGG so the file carries a real duration (MediaRecorder never
+  // backfills the WebM duration header, which breaks mobile players).
+  if (isWebm && blob.size <= MAX_REMUX_BYTES) {
+    try {
+      blob = await remuxWebmToOgg(blob);
+      filename = 'call-recording.ogg';
+    } catch (_) {
+      /* noop — fall back to uploading the raw WebM */
+    }
+  }
+  // Best-effort — the controller's idempotency guard handles a retry.
+  try {
+    await WhatsappCallsAPI.uploadRecording(callId, blob, filename);
+  } catch (_) {
+    /* noop */
+  }
+};
+
+// The recorder is stopped and what it recorded is taken here; the upload goes on by itself.
+// Waiting on it would keep the microphone, the session and the card for as long as the
+// upload takes, and an upload has no ceiling.
 const stopRecorderAndUpload = async callId => {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     await new Promise(resolve => {
@@ -177,13 +314,7 @@ const stopRecorderAndUpload = async callId => {
   }
   if (!recorderChunks.length || !callId) return;
 
-  const blob = new Blob(recorderChunks, { type: recorderChunks[0].type });
-  // Best-effort — the controller's idempotency guard handles a retry.
-  try {
-    await WhatsappCallsAPI.uploadRecording(callId, blob);
-  } catch (_) {
-    /* noop */
-  }
+  uploadRecording(callId, recorderChunks.slice());
 };
 
 // devise-token-auth requires access-token / client / uid headers on every
@@ -259,16 +390,23 @@ export function useWhatsappCallSession() {
     return pc.localDescription.sdp;
   };
 
-  const acceptIncomingCall = async ({ callId, sdpOffer, iceServers }) => {
+  const acceptIncomingCall = async ({
+    callId,
+    sdpOffer,
+    iceServers,
+    recordingEnabled,
+  }) => {
     // The store may not have sdpOffer yet (the cable broadcast can race the
     // click). Fall back to GET /whatsapp_calls/:id which exposes it.
     let offer = sdpOffer;
     let ice = iceServers;
+    let recording = recordingEnabled;
     if (!offer && callId) {
       try {
         const fresh = await WhatsappCallsAPI.show(callId);
         offer = fresh?.sdp_offer || fresh?.sdpOffer;
         ice = ice || fresh?.ice_servers || fresh?.iceServers;
+        recording = recording ?? fresh?.recording_enabled;
       } catch (e) {
         // eslint-disable-next-line no-console
         console.error(
@@ -291,6 +429,7 @@ export function useWhatsappCallSession() {
       // Inbound: agent's click is the pickup. Arm the recorder before the API
       // round-trip so when ontrack fires (triggered by setRemoteDescription
       // back in prepareInboundAnswer) the recorder is already authorized.
+      callRecordingEnabled = recording !== false;
       recorderArmed = true;
       setupRecorder();
       await WhatsappCallsAPI.accept(callId, sdpAnswer);
@@ -319,11 +458,17 @@ export function useWhatsappCallSession() {
     if (hasActiveWhatsappCall())
       return { status: VOICE_CALL_OUTBOUND_INIT_STATUS.LOCKED };
     isInitiatingOutbound.value = true;
+    earlyOutboundOutcomes.clear();
     try {
       const sdpOffer = await prepareOutboundOffer();
       const response = await WhatsappCallsAPI.initiate(target, sdpOffer);
       if (response?.id) {
         activeCallId = response.id;
+        activeCallSid = response.call_id || null;
+        // Timed until a pickup with its answer applied hands the call to the transport; a
+        // pickup that raced the dial is settled once the buffered answer below is applied.
+        startRingingTimer(activeCallId, activeCallSid);
+        callRecordingEnabled = response.recording_enabled !== false;
         // A connect webhook that raced ahead of this response was buffered;
         // apply our own by id now that we know it, then drop every buffered
         // answer (concurrent agents' calls aren't ours to apply).
@@ -335,6 +480,7 @@ export function useWhatsappCallSession() {
             sdp: buffered,
           });
         }
+        if (recorderArmed && pc?.remoteDescription) stopRingingTimer();
         return response;
       }
       // No call id back: this is the permission-request branch. The mic +
@@ -408,6 +554,8 @@ export const applyOutboundAnswer = async (callId, sdpAnswer) => {
   // activeCallId known → only apply the answer for this tab's call.
   if (callId !== activeCallId) return;
   await pc.setRemoteDescription({ type: 'answer', sdp: sdpAnswer });
+  // A pickup that came before its answer left the watchdog running for this.
+  if (recorderArmed) stopRingingTimer();
 };
 
 // Called by the cable handler when Meta delivers status=ACCEPTED for the
@@ -415,24 +563,61 @@ export const applyOutboundAnswer = async (callId, sdpAnswer) => {
 // MediaRecorder. Idempotent — safe if ontrack hasn't fired yet (setupRecorder
 // bails until the remote stream has audio tracks; ontrack will retry).
 export const armOutboundRecorder = () => {
+  // Picked up, and with the answer applied the transport is negotiating: from here a lost
+  // call is its to report. Without the answer it never negotiates and never fails, so the
+  // watchdog stays until the answer is applied.
+  if (pc?.remoteDescription) stopRingingTimer();
   recorderArmed = true;
   setupRecorder();
 };
 
 export const cleanupWhatsappSession = () => cleanup();
 
-export const handleWhatsappRemoteEnd = async callId => {
+// outcome: 'accepted' or 'ended'. Kept only while this tab is placing a call whose id it
+// does not know yet, or knows and has not added yet; anything else is not this tab's.
+export const noteEarlyOutboundOutcome = (callId, outcome) => {
+  if (!pc || (activeCallId != null && activeCallId !== callId)) return;
+  if (earlyOutboundOutcomes.get(callId) === 'ended') return;
+  earlyOutboundOutcomes.set(callId, outcome);
+};
+
+// An end alone, for a call this tab no longer owns: a session torn down by the end of
+// the call it was placing. Any other outcome stays where it is.
+export const takeEarlyOutboundEnd = callId => {
+  if (earlyOutboundOutcomes.get(callId) !== 'ended') return undefined;
+  earlyOutboundOutcomes.delete(callId);
+  return 'ended';
+};
+
+export const takeEarlyOutboundOutcome = callId => {
+  const outcome = earlyOutboundOutcomes.get(callId);
+  earlyOutboundOutcomes.delete(callId);
+  return outcome;
+};
+
+// One end of a call can be asked for twice: by its broadcast, and by the store adding a
+// call whose end it kept. The second waits for the first instead of tearing down the
+// recorder whose upload the first is still finishing.
+let ending = null;
+
+export const handleWhatsappRemoteEnd = callId => {
   // Snapshot before cleanup nulls activeCallId.
   const id = callId || activeCallId;
   if (!id) {
     cleanup();
-    return;
+    return Promise.resolve();
   }
-  try {
-    await stopRecorderAndUpload(id);
-  } finally {
-    cleanup();
-  }
+  if (ending?.id === id) return ending.promise;
+  const promise = (async () => {
+    try {
+      await stopRecorderAndUpload(id);
+    } finally {
+      cleanup();
+      ending = null;
+    }
+  })();
+  ending = { id, promise };
+  return promise;
 };
 
 export const setWhatsappCallMuted = muted => {

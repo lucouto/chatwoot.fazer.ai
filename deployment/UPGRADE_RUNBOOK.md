@@ -23,10 +23,10 @@
 | Container naming | `<component>-<service-uuid>`, e.g. `postgres-f8kkkgcsko4sogs88k8c80ok`, `rails-vkg4sgcco4wg8os4sckws088` |
 | ⚠️ Not a service uuid | `q4sgkowosk88os848k008o0o` is the Coolify **project** "Production Stack" that contains *every* service — prod, staging and everything unrelated. Both stacks above live inside it; they are separate **services**, not separate projects. |
 | Compose files (repo) | `docker-compose.production-<ver>.yaml`, `docker-compose.staging-<ver>.yaml` |
-| Current prod version | **v4.17.0-fazer-ai.115-ee** (cut over 2026-09-17 19:43 CEST) |
-| Current staging version | **v4.17.0-fazer-ai.115-ee** (as of 2026-09-17) |
+| Current prod version | **v4.19.0-fazer-ai.135-ee** (cut over 2026-10-22 03:09 CEST) |
+| Current staging version | **v4.19.0-fazer-ai.135-ee** (as of 2026-10-21) |
 | Repo topology | **single branch `main`** — every historical branch was folded in and deleted 2026-09-17 |
-| Rollback target | `v4.14.2-fazer-ai.85-ee` → commit `6105d475a` (tag, not a branch) |
+| Rollback target | `v4.17.0-fazer-ai.115-ee` → commit `0478ecdf7` (tag, not a branch) |
 
 ### ⚠️ Confirm `main` IS what prod runs before branching
 
@@ -190,7 +190,10 @@ docker rm -f migtest-pg migtest-redis; docker volume rm migtest-pgdata; docker n
 Pass = no `Undeclared attribute` / `PG::` / `rails aborted`, and `db:migrate:status` shows
 0 `down`. **Result on 2026-09-17 for 4.14.2 → 4.17.0** (160 applied → 214, 54 migrations,
 3 minor versions in one shot): clean, the §6 bug did **not** recur. If it ever does, §6 has
-the fix.
+the fix. **2026-10-21, 4.17.0 → 4.19.0** (214 → 246, 32 migrations): clean, slowest 1.1 s.
+
+> The image ENTRYPOINT is `docker-entrypoint.sh`, not the sidekiq gate, so `docker run ... rails db:migrate`
+> above runs directly. Pass `-e WHATSAPP_CONNECTOR_ENABLED=false` too (see §3).
 
 ---
 
@@ -218,10 +221,19 @@ fails on writes that CREATE records — healthy container, empty queue, messages
 lost. While it waits, its argv still contains `sidekiq`, so the **old** healthcheck
 (`ps aux | grep [s]idekiq`) calls a stalled worker healthy. Both lines or neither.
 
+**Since 4.19, `WHATSAPP_CONNECTOR_ENABLED=false` on rails + sidekiq.** The image bundles
+fazer.ai's whatsapp-connector and `sidekiq.sh` runs it inside the worker by default, creating a
+`<db>_whatsapp_connector` database on the same Postgres. This install stays on Baileys
+(`baileys-api`), so the native provider is off. Turning it on is its own change, not part of an
+upgrade. Verify: `docker exec <sidekiq> sh -c 'ps aux | grep -i [c]onnector | wc -l'` → 0.
+
+**Never set `DISABLE_ENTERPRISE`.** Since 4.19 `ChatwootApp.enterprise?` returns false when it is
+set, even with `enterprise/` in the image.
+
 Updating a Coolify service's compose over the API needs the YAML **base64-encoded**:
 ```bash
 PATCH $COOLIFY_API_URL/services/<uuid>   {"docker_compose_raw": "<base64>"}
-GET   $COOLIFY_API_URL/services/<uuid>/start
+POST  $COOLIFY_API_URL/services/<uuid>/restart?latest=true   # a running service: /start answers 400 "already running"; /start is POST now, GET is 405
 ```
 
 SMTP is env-var driven (Gmail, port 587 STARTTLS). Set in Coolify env vars, not compose:
@@ -251,15 +263,15 @@ migrations completed, Baileys version). **Trust this over the Coolify badge** (s
 
 ---
 
-### Measured cutover cost (4.14.2 → 4.17.0, 2026-09-17)
+### Measured cutover cost
 
-| | |
-|---|---|
-| Downtime (503 → 200) | **~110 s** |
-| Migrations | 160 → 214 (54), all inside the boot |
-| New dead Sidekiq jobs | **0** (the 18 in the set are from June 2026) |
-| WhatsApp | Baileys channel back to `connection: open` on its own |
-| Prod dump | 777 MB, ~2 min |
+| | 4.14.2 → 4.17.0 (2026-09-17) | 4.17.0 → 4.19.0 (2026-10-22) |
+|---|---|---|
+| Downtime (non-200 → 200) | **~110 s** | **71 s** |
+| Migrations | 160 → 214 (54), all inside the boot | 214 → 246 (32) |
+| New dead Sidekiq jobs | **0** (the 18 in the set are from June 2026) | **0** |
+| WhatsApp | Baileys channel back to `connection: open` on its own | same |
+| Prod dump | 777 MB, ~2 min | 778 MB |
 
 Promote the **same image staging ran** — do not re-cut the tag for prod. Rebuilding ships
 an artifact nobody tested to fix a provenance question that inspecting the image already
@@ -327,18 +339,20 @@ In Coolify set both `rails` and `sidekiq` back to the previous tag and redeploy:
 ```yaml
 image: 'ghcr.io/lucouto/chatwoot.fazer.ai:<previous-ver>-ee'
 ```
-**Current rollback target: `v4.14.2-fazer-ai.85-ee`** (commit `6105d475a`).
+**Current rollback target: `v4.17.0-fazer-ai.115-ee`** (commit `0478ecdf7`), with
+`docker-compose.production-v4.17.0.yaml`.
 
-Image rollback alone is normally enough — migrations are additive, and 4.14.2 tolerates the
-4.17 schema. Restore from the §5 dump only if a migration corrupted data.
+Image rollback alone is normally enough — migrations are additive, so 4.17.0 should tolerate the
+4.19 schema (not rehearsed). Restore from the §5 dump only if a migration corrupted data.
 
 Rollback does **not** depend on any branch. All upgrade branches were deleted 2026-09-17;
 every commit that matters is pinned by a tag and reachable from `main`:
 
 | tag | commit | what it is |
 |---|---|---|
-| `v4.17.0-fazer-ai.115-ee` | `0478ecdf7` | what prod runs (Instance Status shows `Build 0478ecd`) |
-| `v4.14.2-fazer-ai.85-ee` | `6105d475a` | rollback target |
+| `v4.19.0-fazer-ai.135-ee` | `3cc0c8593` | what prod runs since 2026-10-22 |
+| `v4.17.0-fazer-ai.115-ee` | `0478ecdf7` | rollback target |
+| `v4.14.2-fazer-ai.85-ee` | `6105d475a` | previous rollback target |
 
 If you roll back, put the §5 dump somewhere safe first — it is the only copy of the
 pre-cutover data.

@@ -9,6 +9,21 @@ const LIGHT_THEME = 'light';
 const getCurrentTheme = () =>
   document.body.classList.contains(DARK_THEME) ? DARK_THEME : LIGHT_THEME;
 
+// Fork: dashboard apps whose origin is listed in DASHBOARD_APP_AUTH_ORIGINS
+// also receive the agent's Chatwoot access token, so they can sign the agent in
+// without a second login (Broadcaster verifies it server-side against
+// /api/v1/profile). The token is only ever posted to that exact origin.
+const getAuthOrigin = url => {
+  const allowed = window.chatwootConfig?.dashboardAppAuthOrigins || [];
+  if (!url || !allowed.length) return null;
+  try {
+    const { origin } = new URL(url);
+    return allowed.includes(origin) ? origin : null;
+  } catch {
+    return null;
+  }
+};
+
 export default {
   components: {
     LoadingState,
@@ -114,11 +129,21 @@ export default {
       // However, when ref is used together with v-for, the ref you get will be
       // an array containing the child components mirroring the data source.
       const frameElement = document.getElementById(this.getFrameId(index));
-      const eventData = {
-        event: APP_CONTEXT_EVENT,
-        data: this.dashboardAppContext,
-      };
-      frameElement.contentWindow.postMessage(JSON.stringify(eventData), '*');
+      const authOrigin = getAuthOrigin(this.config[index]?.url);
+      const data = authOrigin
+        ? {
+            ...this.dashboardAppContext,
+            currentAgent: {
+              ...this.currentAgent,
+              access_token: this.$store.getters.getCurrentUser.access_token,
+            },
+          }
+        : this.dashboardAppContext;
+      const eventData = { event: APP_CONTEXT_EVENT, data };
+      frameElement.contentWindow.postMessage(
+        JSON.stringify(eventData),
+        authOrigin || '*'
+      );
       this.iframeLoading = false;
     },
   },

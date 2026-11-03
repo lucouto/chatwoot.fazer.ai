@@ -71,6 +71,12 @@ jobs:
           check "custom attributes resolve in create mode too" \
             app/javascript/dashboard/helper/automationHelper.js \
             -- 'Check for custom attributes in both edit and create modes'
+          check "dashboard apps on the allowlist get the agent token" \
+            app/javascript/dashboard/components/widgets/DashboardApp/Frame.vue \
+            -- 'dashboardAppAuthOrigins'
+          check "layout exposes DASHBOARD_APP_AUTH_ORIGINS" \
+            app/views/layouts/vueapp.html.erb \
+            -- 'DASHBOARD_APP_AUTH_ORIGINS'
 
           # Inverse check: upstream ships a native Kanban sidebar entry, this fork removes it.
           if grep -qi kanban app/javascript/dashboard/components-next/sidebar/Sidebar.vue; then

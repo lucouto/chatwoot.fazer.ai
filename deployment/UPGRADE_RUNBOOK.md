@@ -23,8 +23,8 @@
 | Container naming | `<component>-<service-uuid>`, e.g. `postgres-f8kkkgcsko4sogs88k8c80ok`, `rails-vkg4sgcco4wg8os4sckws088` |
 | ⚠️ Not a service uuid | `q4sgkowosk88os848k008o0o` is the Coolify **project** "Production Stack" that contains *every* service — prod, staging and everything unrelated. Both stacks above live inside it; they are separate **services**, not separate projects. |
 | Compose files (repo) | `docker-compose.production-<ver>.yaml`, `docker-compose.staging-<ver>.yaml` |
-| Current prod version | **v4.19.0-fazer-ai.135-ee** (cut over 2026-10-22 03:09 CEST) |
-| Current staging version | **v4.19.0-fazer-ai.135-ee** (as of 2026-10-21) |
+| Current prod version | **v4.19.0-fazer-ai.135-bcast1-ee** (cut over 2026-11-03 23:46 CET; = `.135-ee` + dashboard-app auth token, PR #3) |
+| Current staging version | **v4.19.0-fazer-ai.135-bcast1-ee** (as of 2026-11-03) |
 | Repo topology | **single branch `main`** — every historical branch was folded in and deleted 2026-09-17 |
 | Rollback target | `v4.17.0-fazer-ai.115-ee` → commit `0478ecdf7` (tag, not a branch) |
 
@@ -47,13 +47,20 @@ Belt as well as braces: §1's publish workflow now fails the build if a fork cus
 is missing, so a wrong base can no longer ship quietly.
 
 **Why we build our own image** (not fazer-ai's stock): we keep customizations. As of
-v4.17.0 there are exactly **three**, all frontend, all asserted by CI on every publish:
+v4.19.0-fazer-ai.135-bcast1 there are exactly **four**, all asserted by CI on every publish:
 
 | customization | file |
 |---|---|
 | `OPERATOR_TYPES_7` defined | `app/javascript/dashboard/routes/dashboard/settings/automation/operators.js` |
 | text custom attributes use it | `app/javascript/dashboard/helper/automationHelper.js` |
 | custom attributes resolve in create mode too | `app/javascript/dashboard/helper/automationHelper.js` |
+| dashboard apps on `DASHBOARD_APP_AUTH_ORIGINS` get the agent's `access_token` (exact-origin postMessage) | `app/javascript/dashboard/components/widgets/DashboardApp/Frame.vue` (`getAuthOrigin`) + `app/views/layouts/vueapp.html.erb` (`dashboardAppAuthOrigins`) |
+
+The fourth one is what lets Broadcaster sign agents in without a pasted token (it verifies
+the token against `/api/v1/profile` server-side). It only works if the **rails** service env
+carries `DASHBOARD_APP_AUTH_ORIGINS=https://broadcaster.cheminneuf.community` — keep that
+line in every compose (prod and staging). Lose either the code or the env line and
+Broadcaster silently falls back to its paste-a-token form.
 
 Plus one *removal*: the native Kanban sidebar entry stays out of
 `components-next/sidebar/Sidebar.vue` (upstream keeps re-adding it; we use external
@@ -115,7 +122,7 @@ would have overwritten a published image with a differently-built one.
 
 **All six are now `workflow_dispatch`-only**, leaving `publish_my_ee_docker.yml` as the sole
 automatic publisher (`push: tags: v*`). It also gained a **pre-publish check** that fails the
-build if any of the three customizations is missing, if the native Kanban entry returns, or
+build if any of the four customizations is missing, if the native Kanban entry returns, or
 if `enterprise/` is absent.
 
 **If you ever re-enable one of them, this race returns.** Verify with:
@@ -273,6 +280,10 @@ migrations completed, Baileys version). **Trust this over the Coolify badge** (s
 | WhatsApp | Baileys channel back to `connection: open` on its own | same |
 | Prod dump | 777 MB, ~2 min | 778 MB |
 
+An image-only change with no migrations (2026-11-03, `.135-ee` → `.135-bcast1-ee`, done via the
+Coolify API `PATCH docker_compose_raw` + `restart?latest=true`) still costs a full restart:
+**~85 s** of non-200 on prod, ~3 min on staging. Plan for it the same way.
+
 Promote the **same image staging ran** — do not re-cut the tag for prod. Rebuilding ships
 an artifact nobody tested to fix a provenance question that inspecting the image already
 answers.
@@ -340,7 +351,9 @@ In Coolify set both `rails` and `sidekiq` back to the previous tag and redeploy:
 image: 'ghcr.io/lucouto/chatwoot.fazer.ai:<previous-ver>-ee'
 ```
 **Current rollback target: `v4.17.0-fazer-ai.115-ee`** (commit `0478ecdf7`), with
-`docker-compose.production-v4.17.0.yaml`.
+`docker-compose.production-v4.17.0.yaml`. To undo only the 2026-11-03 dashboard-app auth
+change, go back to `v4.19.0-fazer-ai.135-ee` instead (no schema change; drop the
+`DASHBOARD_APP_AUTH_ORIGINS` line too). Pre-cutover dump: `~/chatwoot_prod_2026-11-03-bcast1.dump`.
 
 Image rollback alone is normally enough — migrations are additive, so 4.17.0 should tolerate the
 4.19 schema (not rehearsed). Restore from the §5 dump only if a migration corrupted data.
@@ -350,7 +363,8 @@ every commit that matters is pinned by a tag and reachable from `main`:
 
 | tag | commit | what it is |
 |---|---|---|
-| `v4.19.0-fazer-ai.135-ee` | `3cc0c8593` | what prod runs since 2026-10-22 |
+| `v4.19.0-fazer-ai.135-bcast1-ee` | `9024862c1` | what prod runs since 2026-11-03 |
+| `v4.19.0-fazer-ai.135-ee` | `3cc0c8593` | prod 2026-10-22 → 11-03; rollback target for the bcast1 change alone (same schema) |
 | `v4.17.0-fazer-ai.115-ee` | `0478ecdf7` | rollback target |
 | `v4.14.2-fazer-ai.85-ee` | `6105d475a` | previous rollback target |
 

@@ -66,6 +66,7 @@
         inboxEventsEnabled: '<%= ENV['ENABLE_INBOX_EVENTS'].present? %>',
         searchTimeRangeLimitDays: <%= Limits.search_time_range_limit_days %>,
         autoResolveMinMinutes: <%= Limits.auto_resolve_min_minutes %>,
+        dashboardAppAuthOrigins: <%= ENV.fetch('DASHBOARD_APP_AUTH_ORIGINS', '').split(',').map(&:strip).reject(&:empty?).to_json.html_safe %>,
         selectedLocale: '<%= I18n.locale %>'
       }
       window.globalConfig = <%= raw @global_config.to_json %>

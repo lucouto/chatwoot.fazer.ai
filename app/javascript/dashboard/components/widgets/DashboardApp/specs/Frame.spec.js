@@ -163,4 +163,61 @@ describe('DashboardAppFrame', () => {
     expect(firstFrameWindow.postMessage).not.toHaveBeenCalled();
     expect(secondFrameWindow.postMessage).toHaveBeenCalledOnce();
   });
+
+  describe('access token for allowlisted apps', () => {
+    const mountWith = async url => {
+      wrapper.unmount();
+      store.state.currentUser = {
+        ...store.state.currentUser,
+        access_token: 'cw-secret',
+      };
+      wrapper = shallowMount(Frame, {
+        attachTo: document.body,
+        props: {
+          config: [{ type: 'frame', url }],
+          currentChat: { id: 1, meta: { sender: { id: 2 } } },
+          isVisible: true,
+          position: 0,
+        },
+        global: { plugins: [store] },
+      });
+      const frame = wrapper.find('iframe');
+      const postMessage = vi.fn();
+      Object.defineProperty(frame.element, 'contentWindow', {
+        value: { postMessage },
+      });
+      await frame.trigger('load');
+      return postMessage;
+    };
+
+    beforeEach(() => {
+      window.chatwootConfig = {
+        dashboardAppAuthOrigins: ['https://broadcaster.example.com'],
+      };
+    });
+
+    afterEach(() => {
+      delete window.chatwootConfig;
+    });
+
+    it('sends the token only to the exact allowlisted origin', async () => {
+      const postMessage = await mountWith(
+        'https://broadcaster.example.com/embed'
+      );
+      const [message, targetOrigin] = postMessage.mock.calls[0];
+      expect(targetOrigin).toBe('https://broadcaster.example.com');
+      expect(JSON.parse(message).data.currentAgent.access_token).toBe(
+        'cw-secret'
+      );
+    });
+
+    it('never sends the token to other apps', async () => {
+      const postMessage = await mountWith('https://other.example.com/embed');
+      const [message, targetOrigin] = postMessage.mock.calls[0];
+      expect(targetOrigin).toBe('*');
+      expect(
+        JSON.parse(message).data.currentAgent.access_token
+      ).toBeUndefined();
+    });
+  });
 });

@@ -519,6 +519,102 @@ describe Whatsapp::Providers::WhatsappCloudService do
         expect(service.send_template('+123456789', template_info, message)).to eq('message_id')
       end
     end
+
+    context 'when routing by template category (Marketing Messages API)' do
+      let(:messages_url) { 'https://graph.facebook.com/v13.0/123456789/messages' }
+      let(:marketing_messages_url) { 'https://graph.facebook.com/v23.0/123456789/marketing_messages' }
+      let(:category) { 'MARKETING' }
+
+      before do
+        whatsapp_channel.update_columns( # rubocop:disable Rails/SkipsModelValidations
+          message_templates: [{ 'name' => 'test_template', 'language' => 'en_US', 'category' => category, 'status' => 'APPROVED' }]
+        )
+      end
+
+      def graph_error(code, transient: false)
+        { error: { message: "error #{code}", type: 'OAuthException', code: code, is_transient: transient } }.to_json
+      end
+
+      it 'sends a MARKETING template to /marketing_messages with the same body' do
+        stub = stub_request(:post, marketing_messages_url).with(body: template_body.to_json)
+                                                          .to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
+
+        expect(service.send_template('+123456789', template_info, message)).to eq('message_id')
+        expect(stub).to have_been_requested.once
+        expect(a_request(:post, messages_url)).not_to have_been_made
+      end
+
+      it 'matches the category on name and language' do
+        whatsapp_channel.update_columns( # rubocop:disable Rails/SkipsModelValidations
+          message_templates: [{ 'name' => 'test_template', 'language' => 'fr', 'category' => 'MARKETING' }]
+        )
+        stub_request(:post, messages_url).to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
+
+        expect(service.send_template('+123456789', template_info, message)).to eq('message_id')
+        expect(a_request(:post, marketing_messages_url)).not_to have_been_made
+      end
+
+      context 'when the template is UTILITY' do
+        let(:category) { 'UTILITY' }
+
+        it 'keeps sending to /messages' do
+          stub_request(:post, messages_url).with(body: template_body.to_json)
+                                           .to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
+
+          expect(service.send_template('+123456789', template_info, message)).to eq('message_id')
+          expect(a_request(:post, marketing_messages_url)).not_to have_been_made
+        end
+
+        it 'retries once on /marketing_messages and refreshes templates when /messages refuses it with 131063' do
+          stub_request(:post, messages_url).to_return(status: 400, body: graph_error(131_063), headers: response_headers)
+          retry_stub = stub_request(:post, marketing_messages_url)
+                       .to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
+
+          expect { expect(service.send_template('+123456789', template_info, message)).to eq('message_id') }
+            .to have_enqueued_job(Channels::Whatsapp::TemplatesSyncJob).with(whatsapp_channel)
+          expect(retry_stub).to have_been_requested.once
+        end
+
+        it 'does not retry on any other /messages error' do
+          stub_request(:post, messages_url).to_return(status: 400, body: graph_error(132_001), headers: response_headers)
+
+          expect(service.send_template('+123456789', template_info, message)).to be_nil
+          expect(a_request(:post, marketing_messages_url)).not_to have_been_made
+          expect(message.reload.status).to eq('failed')
+        end
+      end
+
+      it 'falls back to /messages once when /marketing_messages refuses the send' do
+        stub_request(:post, marketing_messages_url).to_return(status: 400, body: graph_error(100), headers: response_headers)
+        fallback = stub_request(:post, messages_url).to_return(status: 200, body: whatsapp_response.to_json, headers: response_headers)
+
+        expect(service.send_template('+123456789', template_info, message)).to eq('message_id')
+        expect(fallback).to have_been_requested.once
+      end
+
+      it 'does not fall back when the /marketing_messages error is transient' do
+        stub_request(:post, marketing_messages_url).to_return(status: 400, body: graph_error(131_000, transient: true), headers: response_headers)
+
+        expect(service.send_template('+123456789', template_info, message)).to be_nil
+        expect(a_request(:post, messages_url)).not_to have_been_made
+      end
+
+      it 'does not fall back on a server error' do
+        stub_request(:post, marketing_messages_url).to_return(status: 503, body: graph_error(2), headers: response_headers)
+
+        expect(service.send_template('+123456789', template_info, message)).to be_nil
+        expect(a_request(:post, messages_url)).not_to have_been_made
+      end
+
+      it 'retries at most once' do
+        stub_request(:post, marketing_messages_url).to_return(status: 400, body: graph_error(100), headers: response_headers)
+        fallback = stub_request(:post, messages_url).to_return(status: 400, body: graph_error(131_063), headers: response_headers)
+
+        expect(service.send_template('+123456789', template_info, message)).to be_nil
+        expect(a_request(:post, marketing_messages_url)).to have_been_made.once
+        expect(fallback).to have_been_requested.once
+      end
+    end
   end
 
   describe 'when the recipient is a Business-Scoped User ID (BSUID)' do

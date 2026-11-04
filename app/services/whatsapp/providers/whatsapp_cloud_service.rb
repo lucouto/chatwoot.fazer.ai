@@ -16,6 +16,18 @@ class Whatsapp::Providers::WhatsappCloudService < Whatsapp::Providers::BaseServi
   # that work there today.
   VOICE_MESSAGE_CONTENT_TYPES = %w[audio/ogg audio/mpeg audio/amr audio/mp4 audio/aac].freeze
 
+  # Marketing Messages API: Meta stops accepting MARKETING templates on the Cloud API `/messages`
+  # endpoint on 2027-10-13 (WABAs created from 2027-04-13 never could), and a WABA that sets
+  # `disable_marketing_messages_on_cloud_api` gets them rejected there right away with 131063.
+  # Every other category stays on `/messages`. The request and response bodies are identical, so
+  # only the URL changes. The endpoint is picked from the template's *current* category, because
+  # Meta can recategorise an approved template (UTILITY -> MARKETING) after the fact.
+  # https://developers.facebook.com/documentation/business-messaging/whatsapp/marketing-messages/route-template-messages
+  MARKETING_TEMPLATE_CATEGORY = 'MARKETING'.freeze
+  MARKETING_MESSAGES_API_VERSION = 'v23.0'.freeze
+  # "Marketing template messages are not supported on Cloud API" (sent to `/messages`).
+  MARKETING_NOT_ALLOWED_ON_CLOUD_API_ERROR = 131_063
+
   def send_message(phone_number, message)
     @message = message
 
@@ -40,13 +52,15 @@ class Whatsapp::Providers::WhatsappCloudService < Whatsapp::Providers::BaseServi
       **recipient_params(phone_number),
       type: 'template',
       template: template_body
-    }
+    }.to_json
 
-    response = post_outgoing(
-      "#{phone_id_path}/messages",
-      headers: api_headers,
-      body: request_body.to_json
-    )
+    marketing = marketing_template?(template_info)
+    response = post_template(request_body, marketing: marketing)
+
+    if retry_on_other_template_endpoint?(response, marketing: marketing)
+      Channels::Whatsapp::TemplatesSyncJob.perform_later(whatsapp_channel)
+      response = post_template(request_body, marketing: !marketing)
+    end
 
     process_response(response, message)
   end
@@ -326,6 +340,35 @@ class Whatsapp::Providers::WhatsappCloudService < Whatsapp::Providers::BaseServi
     type_content['filename'] = attachment.file.filename if type == 'document'
     type_content['voice'] = true if voice_message?(type, attachment)
     type_content
+  end
+
+  def post_template(request_body, marketing:)
+    url = marketing ? "#{phone_id_path(MARKETING_MESSAGES_API_VERSION)}/marketing_messages" : "#{phone_id_path}/messages"
+    post_outgoing(url, headers: api_headers, body: request_body)
+  end
+
+  # The cached category is at most one sync old. Unknown templates keep the historical `/messages` route.
+  def marketing_template?(template_info)
+    template = Array(whatsapp_channel.message_templates).find do |candidate|
+      candidate['name'] == template_info[:name] && candidate['language'] == template_info[:lang_code]
+    end
+    template&.dig('category') == MARKETING_TEMPLATE_CATEGORY
+  end
+
+  # One retry on the other endpoint, only after a confirmed refusal (a Graph error envelope, never
+  # a transport failure or a throttled/transient answer), so a send is never delivered twice:
+  # - `/messages` refused with 131063: the template became MARKETING since the last sync.
+  # - `/marketing_messages` refused: the template is no longer MARKETING, the WABA has not accepted
+  #   the Marketing Messages API terms, or the recipient shape is not supported there. `/messages`
+  #   still takes all of those until 2027-10-13.
+  def retry_on_other_template_endpoint?(response, marketing:)
+    return false if response.success?
+
+    error = response.parsed_response.is_a?(Hash) ? response.parsed_response['error'] : nil
+    return false unless error.is_a?(Hash)
+    return false if error['is_transient'] == true || response.code.to_i == 429 || response.code.to_i >= 500
+
+    marketing || error['code'].to_i == MARKETING_NOT_ALLOWED_ON_CLOUD_API_ERROR
   end
 
   def template_body_parameters(template_info)

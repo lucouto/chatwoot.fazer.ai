@@ -364,11 +364,21 @@ class Whatsapp::Providers::WhatsappCloudService < Whatsapp::Providers::BaseServi
   def retry_on_other_template_endpoint?(response, marketing:)
     return false if response.success?
 
-    error = response.parsed_response.is_a?(Hash) ? response.parsed_response['error'] : nil
-    return false unless error.is_a?(Hash)
-    return false if error['is_transient'] == true || response.code.to_i == 429 || response.code.to_i >= 500
+    error = confirmed_refusal(response)
+    return false if error.nil?
 
     marketing || error['code'].to_i == MARKETING_NOT_ALLOWED_ON_CLOUD_API_ERROR
+  end
+
+  # The Graph error of a refusal Meta means, or nil when the answer may be transient (429, 5xx,
+  # `is_transient`) or carries no error envelope.
+  def confirmed_refusal(response)
+    return if response.code.to_i == 429 || response.code.to_i >= 500
+
+    error = response.parsed_response.is_a?(Hash) ? response.parsed_response['error'] : nil
+    return unless error.is_a?(Hash)
+
+    error unless error['is_transient'] == true
   end
 
   def template_body_parameters(template_info)

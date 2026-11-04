@@ -140,7 +140,7 @@ class Webhooks::WhatsappEventsJob < MutexApplicationJob
     Array(params[:entry]).select { |entry| entry[:id].to_s == waba_id }
                          .flat_map { |entry| Array(entry[:changes]) }
                          .select { |change| change[:field] == TEMPLATE_CATEGORY_UPDATE_FIELD }
-                         .map { |change| change[:value] }
+                         .pluck(:value)
   end
 
   # Debug aid for non-production only: set WHATSAPP_WEBHOOK_DEBUG=true to log the

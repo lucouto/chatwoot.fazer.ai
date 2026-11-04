@@ -131,15 +131,16 @@ class Webhooks::WhatsappEventsJob < MutexApplicationJob
     return if channel.blank? || channel.provider != 'whatsapp_cloud' || channel_is_inactive?(channel)
 
     waba_id = channel.provider_config['business_account_id'].to_s
-    Array(params[:entry]).each do |entry|
-      next unless entry[:id].to_s == waba_id
-
-      Array(entry[:changes]).each do |change|
-        next unless change[:field] == TEMPLATE_CATEGORY_UPDATE_FIELD
-
-        Whatsapp::TemplateCategoryUpdateService.new(waba_id: waba_id, value: change[:value]).perform
-      end
+    template_category_changes(params, waba_id).each do |value|
+      Whatsapp::TemplateCategoryUpdateService.new(waba_id: waba_id, value: value).perform
     end
+  end
+
+  def template_category_changes(params, waba_id)
+    Array(params[:entry]).select { |entry| entry[:id].to_s == waba_id }
+                         .flat_map { |entry| Array(entry[:changes]) }
+                         .select { |change| change[:field] == TEMPLATE_CATEGORY_UPDATE_FIELD }
+                         .map { |change| change[:value] }
   end
 
   # Debug aid for non-production only: set WHATSAPP_WEBHOOK_DEBUG=true to log the

@@ -1,5 +1,8 @@
 require 'rails_helper'
 
+# Templates are stored with update_columns in the app too (sync_templates); fixtures mirror that.
+# rubocop:disable Rails/SkipsModelValidations
+
 RSpec.describe Whatsapp::TemplateCategoryUpdateService do
   let(:waba_id) { '123456789' }
   let(:templates) do
@@ -72,3 +75,4 @@ RSpec.describe Whatsapp::TemplateCategoryUpdateService do
     expect { described_class.new(waba_id: waba_id, value: change).perform }.not_to raise_error
   end
 end
+# rubocop:enable Rails/SkipsModelValidations

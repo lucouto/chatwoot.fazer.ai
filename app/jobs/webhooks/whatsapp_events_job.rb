@@ -15,8 +15,12 @@ class Webhooks::WhatsappEventsJob < MutexApplicationJob
   CHAT_LOCK_RETRY_ATTEMPTS = (Whatsapp::Session::Inbound::Locks::IMPORT_CHAT_LOCK_TTL.to_i / CHAT_LOCK_RETRY_WAIT.to_i * 1.5).ceil
   retry_on Whatsapp::Session::Inbound::Locks::Busy, wait: CHAT_LOCK_RETRY_WAIT, attempts: CHAT_LOCK_RETRY_ATTEMPTS
 
+  TEMPLATE_CATEGORY_UPDATE_FIELD = 'template_category_update'.freeze
+
   def perform(params = {})
     dump_raw_payload(params)
+    return handle_template_category_updates(params) if template_category_update_event?(params)
+
     channel = find_channel_from_whatsapp_business_payload(params)
 
     if channel_is_inactive?(channel)
@@ -112,6 +116,31 @@ class Webhooks::WhatsappEventsJob < MutexApplicationJob
   end
 
   private
+
+  # Template webhooks are WABA-level: no `metadata.phone_number_id`, so the payload alone names no
+  # inbox, only a WABA (`entry.id`). The inbox in the URL is the one whose signature was checked, and
+  # only its own WABA is touched, so a webhook accepted for one inbox cannot rewrite another WABA's
+  # templates.
+  def template_category_update_event?(params)
+    params[:object] == 'whatsapp_business_account' &&
+      params.dig(:entry, 0, :changes, 0, :field) == TEMPLATE_CATEGORY_UPDATE_FIELD
+  end
+
+  def handle_template_category_updates(params)
+    channel = find_channel_by_url_param(params)
+    return if channel.blank? || channel.provider != 'whatsapp_cloud' || channel_is_inactive?(channel)
+
+    waba_id = channel.provider_config['business_account_id'].to_s
+    Array(params[:entry]).each do |entry|
+      next unless entry[:id].to_s == waba_id
+
+      Array(entry[:changes]).each do |change|
+        next unless change[:field] == TEMPLATE_CATEGORY_UPDATE_FIELD
+
+        Whatsapp::TemplateCategoryUpdateService.new(waba_id: waba_id, value: change[:value]).perform
+      end
+    end
+  end
 
   # Debug aid for non-production only: set WHATSAPP_WEBHOOK_DEBUG=true to log the
   # raw inbound webhook payload (Baileys or Cloud) so you can capture a real

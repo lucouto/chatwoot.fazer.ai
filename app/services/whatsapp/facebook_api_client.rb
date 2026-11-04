@@ -3,7 +3,9 @@ class Whatsapp::FacebookApiClient # rubocop:disable Metrics/ClassLength
 
   BASE_URI = 'https://graph.facebook.com'.freeze
   # Base webhook fields resent on every subscribe so Meta won't reset to defaults. `calls` is added by callers only when voice is enabled.
-  WEBHOOK_DEFAULT_FIELDS = %w[messages smb_message_echoes].freeze
+  # `template_category_update` keeps the stored template categories current, which sending routes on
+  # (MARKETING → /marketing_messages); see Whatsapp::TemplateCategoryUpdateService.
+  WEBHOOK_DEFAULT_FIELDS = %w[messages smb_message_echoes template_category_update].freeze
 
   def initialize(access_token = nil, deadline: Whatsapp::GraphDeadline::NONE)
     @access_token = access_token

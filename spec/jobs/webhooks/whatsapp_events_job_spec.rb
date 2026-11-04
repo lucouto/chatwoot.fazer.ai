@@ -524,4 +524,59 @@ RSpec.describe Webhooks::WhatsappEventsJob do
       expect(budget).to be > Whatsapp::Session::Inbound::Locks::IMPORT_CHAT_LOCK_TTL
     end
   end
+
+  context 'when a template_category_update webhook arrives' do
+    let(:template_params) do
+      {
+        object: 'whatsapp_business_account',
+        phone_number: channel.phone_number,
+        entry: [{
+          id: channel.provider_config['business_account_id'],
+          changes: [{
+            field: 'template_category_update',
+            value: { message_template_id: 111, message_template_name: 'promo', message_template_language: 'fr',
+                     previous_category: 'UTILITY', new_category: 'MARKETING' }
+          }]
+        }]
+      }.with_indifferent_access
+    end
+
+    before do
+      allow(Whatsapp::TemplateCategoryUpdateService).to receive(:new).and_return(process_service)
+      allow(Whatsapp::IncomingMessageWhatsappCloudService).to receive(:new)
+    end
+
+    it 'hands it to the template category service for the URL inbox WABA, not to the message pipeline' do
+      job.perform_now(template_params)
+
+      expect(Whatsapp::TemplateCategoryUpdateService).to have_received(:new)
+        .with(waba_id: channel.provider_config['business_account_id'], value: hash_including('new_category' => 'MARKETING'))
+      expect(process_service).to have_received(:perform)
+      expect(Whatsapp::IncomingMessageWhatsappCloudService).not_to have_received(:new)
+    end
+
+    it 'ignores an entry for a WABA the URL inbox does not belong to' do
+      template_params[:entry][0][:id] = 'someone-elses-waba'
+
+      job.perform_now(template_params)
+
+      expect(Whatsapp::TemplateCategoryUpdateService).not_to have_received(:new)
+    end
+
+    it 'ignores it when the URL names no known inbox' do
+      template_params[:phone_number] = '+0000000000'
+
+      job.perform_now(template_params)
+
+      expect(Whatsapp::TemplateCategoryUpdateService).not_to have_received(:new)
+    end
+
+    it 'ignores it for an inactive account' do
+      channel.account.update!(status: :suspended)
+
+      job.perform_now(template_params)
+
+      expect(Whatsapp::TemplateCategoryUpdateService).not_to have_received(:new)
+    end
+  end
 end

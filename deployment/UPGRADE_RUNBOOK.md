@@ -23,8 +23,8 @@
 | Container naming | `<component>-<service-uuid>`, e.g. `postgres-f8kkkgcsko4sogs88k8c80ok`, `rails-vkg4sgcco4wg8os4sckws088` |
 | ⚠️ Not a service uuid | `q4sgkowosk88os848k008o0o` is the Coolify **project** "Production Stack" that contains *every* service — prod, staging and everything unrelated. Both stacks above live inside it; they are separate **services**, not separate projects. |
 | Compose files (repo) | `docker-compose.production-<ver>.yaml`, `docker-compose.staging-<ver>.yaml` |
-| Current prod version | **v4.19.0-fazer-ai.135-mm1-ee** (cut over 2026-11-04 23:12 CET; = `.135-bcast1-ee` + MARKETING templates routed to Meta's `/marketing_messages` API, PR #5) |
-| Current staging version | **v4.19.0-fazer-ai.135-mm1-ee** (as of 2026-11-04) |
+| Current prod version | **v4.19.0-fazer-ai.135-mm2-ee** (cut over 2026-11-05 00:56 CET; = `.135-mm1-ee` + `template_category_update` webhook keeps stored template categories current, PR #7) |
+| Current staging version | **v4.19.0-fazer-ai.135-mm2-ee** (as of 2026-11-05) |
 | Repo topology | **single branch `main`** — every historical branch was folded in and deleted 2026-09-17 |
 | Rollback target | `v4.17.0-fazer-ai.115-ee` → commit `0478ecdf7` (tag, not a branch) |
 
@@ -363,7 +363,8 @@ every commit that matters is pinned by a tag and reachable from `main`:
 
 | tag | commit | what it is |
 |---|---|---|
-| `v4.19.0-fazer-ai.135-mm1-ee` | `ebea51b0f` | what prod runs since 2026-11-04 |
+| `v4.19.0-fazer-ai.135-mm2-ee` | `2b4c5534d` | what prod runs since 2026-11-05 |
+| `v4.19.0-fazer-ai.135-mm1-ee` | `ebea51b0f` | prod 2026-11-04 → 11-05; rollback target for the mm2 change alone (image-only, same schema) |
 | `v4.19.0-fazer-ai.135-bcast1-ee` | `9024862c1` | prod 2026-11-03 → 11-04; rollback target for the mm1 change alone (image-only, same schema) |
 | `v4.19.0-fazer-ai.135-ee` | `3cc0c8593` | prod 2026-10-22 → 11-03; rollback target for the bcast1 change alone (same schema) |
 | `v4.17.0-fazer-ai.115-ee` | `0478ecdf7` | rollback target |
